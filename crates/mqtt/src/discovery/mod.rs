@@ -143,7 +143,10 @@ pub enum Encoding {
 
 #[derive(Serialize, Debug)]
 pub struct DiscoveryLight {
-	pub name: String,
+	pub name: Option<String>,
+	pub has_entity_name: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub object_id: Option<String>,
 	pub unique_id: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub icon: Option<String>,
@@ -161,7 +164,10 @@ pub struct DiscoveryLight {
 
 #[derive(Serialize, Debug)]
 pub struct DiscoveryCamera {
-	pub name: String,
+	pub name: Option<String>,
+	pub has_entity_name: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub object_id: Option<String>,
 	pub unique_id: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub icon: Option<String>,
@@ -173,7 +179,10 @@ pub struct DiscoveryCamera {
 
 #[derive(Serialize, Debug)]
 pub struct DiscoverySwitch {
-	pub name: String,
+	pub name: Option<String>,
+	pub has_entity_name: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub object_id: Option<String>,
 	pub unique_id: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub icon: Option<String>,
@@ -192,7 +201,10 @@ pub struct DiscoverySwitch {
 
 #[derive(Serialize, Debug)]
 pub struct DiscoverySelect {
-	pub name: String,
+	pub name: Option<String>,
+	pub has_entity_name: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub object_id: Option<String>,
 	pub unique_id: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub icon: Option<String>,
@@ -206,7 +218,10 @@ pub struct DiscoverySelect {
 
 #[derive(Serialize, Debug)]
 pub struct DiscoveryBinarySensor {
-	pub name: String,
+	pub name: Option<String>,
+	pub has_entity_name: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub object_id: Option<String>,
 	pub unique_id: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub icon: Option<String>,
@@ -219,7 +234,10 @@ pub struct DiscoveryBinarySensor {
 
 #[derive(Serialize, Debug)]
 pub struct DiscoveryButton {
-	pub name: String,
+	pub name: Option<String>,
+	pub has_entity_name: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub object_id: Option<String>,
 	pub unique_id: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub icon: Option<String>,
@@ -232,7 +250,10 @@ pub struct DiscoveryButton {
 
 #[derive(Serialize, Debug)]
 pub struct DiscoverySensor {
-	pub name: String,
+	pub name: Option<String>,
+	pub has_entity_name: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub object_id: Option<String>,
 	pub unique_id: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub icon: Option<String>,
@@ -358,7 +379,9 @@ pub fn build_floodlight_light(ctx: &DiscoveryContext) -> Option<(String, Vec<u8>
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "floodlight");
 	let payload = DiscoveryLight {
-		name: format!("{friendly} Floodlight"),
+		name: Some("Floodlight".to_string()),
+		has_entity_name: true,
+		object_id: Some("floodlight".to_string()),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:spotlight-beam".to_string()),
 		device: device_block(ctx, &friendly),
@@ -377,7 +400,9 @@ pub fn build_floodlight_tasks_switch(ctx: &DiscoveryContext) -> Option<(String, 
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "floodlight_tasks");
 	let payload = DiscoverySwitch {
-		name: format!("{friendly} Floodlight Tasks"),
+		name: Some("Floodlight Tasks".to_string()),
+		has_entity_name: true,
+		object_id: Some("floodlight_tasks".to_string()),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:spotlight-beam".to_string()),
 		device: device_block(ctx, &friendly),
@@ -396,8 +421,13 @@ pub fn build_floodlight_tasks_switch(ctx: &DiscoveryContext) -> Option<(String, 
 pub fn build_camera(ctx: &DiscoveryContext) -> Option<(String, Vec<u8>)> {
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "camera");
+	// Primary entity for the device — no name, no object_id, so HA derives
+	// the friendly name from the device name and entity_id from the device
+	// slug alone (e.g., `camera.frontdoor`).
 	let payload = DiscoveryCamera {
-		name: format!("{friendly} Camera"),
+		name: None,
+		has_entity_name: true,
+		object_id: None,
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:camera-iris".to_string()),
 		device: device_block(ctx, &friendly),
@@ -415,7 +445,9 @@ pub fn build_motion(ctx: &DiscoveryContext) -> Option<(String, Vec<u8>)> {
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "md");
 	let payload = DiscoveryBinarySensor {
-		name: format!("{friendly} MD"),
+		name: Some("MD".to_string()),
+		has_entity_name: true,
+		object_id: Some("md".to_string()),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:motion-sensor".to_string()),
 		device: device_block(ctx, &friendly),
@@ -435,7 +467,9 @@ pub fn build_led(ctx: &DiscoveryContext) -> Option<(String, Vec<u8>)> {
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "led");
 	let payload = DiscoverySwitch {
-		name: format!("{friendly} LED"),
+		name: Some("LED".to_string()),
+		has_entity_name: true,
+		object_id: Some("led".to_string()),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:led-on".to_string()),
 		device: device_block(ctx, &friendly),
@@ -455,7 +489,9 @@ pub fn build_ir(ctx: &DiscoveryContext) -> Option<(String, Vec<u8>)> {
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "ir");
 	let payload = DiscoverySelect {
-		name: format!("{friendly} IR"),
+		name: Some("IR".to_string()),
+		has_entity_name: true,
+		object_id: Some("ir".to_string()),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:lightbulb-night".to_string()),
 		device: device_block(ctx, &friendly),
@@ -478,7 +514,9 @@ pub fn build_pir(ctx: &DiscoveryContext) -> Option<(String, Vec<u8>)> {
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "pir");
 	let payload = DiscoverySwitch {
-		name: format!("{friendly} PIR"),
+		name: Some("PIR".to_string()),
+		has_entity_name: true,
+		object_id: Some("pir".to_string()),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:motion-sensor".to_string()),
 		device: device_block(ctx, &friendly),
@@ -515,7 +553,9 @@ pub fn build_ptz_presets(ctx: &DiscoveryContext) -> Option<(String, Vec<u8>)> {
 	let mut seen = std::collections::HashSet::new();
 	options.retain(|n| seen.insert(n.clone()));
 	let payload = DiscoverySelect {
-		name: format!("{friendly} Preset"),
+		name: Some("Preset".to_string()),
+		has_entity_name: true,
+		object_id: Some("preset".to_string()),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:target".to_string()),
 		device: device_block(ctx, &friendly),
@@ -542,7 +582,9 @@ pub fn build_reboot(ctx: &DiscoveryContext) -> Option<(String, Vec<u8>)> {
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "reboot");
 	let payload = DiscoveryButton {
-		name: format!("{friendly} Reboot"),
+		name: Some("Reboot".to_string()),
+		has_entity_name: true,
+		object_id: Some("reboot".to_string()),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:restart".to_string()),
 		device: device_block(ctx, &friendly),
@@ -565,7 +607,9 @@ pub fn build_pt_buttons(ctx: &DiscoveryContext) -> Vec<(String, Vec<u8>)> {
 	for dir in ["left", "right", "up", "down"] {
 		let unique_id = unique(ctx.topic_prefix, ctx.camera_name, &format!("pan_{dir}"));
 		let payload = DiscoveryButton {
-			name: format!("{friendly} Pan {dir}"),
+			name: Some(format!("Pan {dir}")),
+			has_entity_name: true,
+			object_id: Some(format!("pan_{dir}")),
 			unique_id: unique_id.clone(),
 			icon: Some(format!("mdi:pan-{dir}")),
 			device: device_block(ctx, &friendly),
@@ -585,7 +629,9 @@ pub fn build_battery(ctx: &DiscoveryContext) -> Option<(String, Vec<u8>)> {
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "battery");
 	let payload = DiscoverySensor {
-		name: format!("{friendly} Battery"),
+		name: Some("Battery".to_string()),
+		has_entity_name: true,
+		object_id: Some("battery".to_string()),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:battery".to_string()),
 		device: device_block(ctx, &friendly),
@@ -603,7 +649,9 @@ pub fn build_siren(ctx: &DiscoveryContext) -> Option<(String, Vec<u8>)> {
 	let friendly = title_case(ctx.camera_name);
 	let unique_id = unique(ctx.topic_prefix, ctx.camera_name, "siren");
 	let payload = DiscoveryButton {
-		name: format!("{friendly} Siren"),
+		name: Some("Siren".to_string()),
+		has_entity_name: true,
+		object_id: Some("siren".to_string()),
 		unique_id: unique_id.clone(),
 		icon: Some("mdi:bell".to_string()),
 		device: device_block(ctx, &friendly),
@@ -709,6 +757,57 @@ mod tests {
 		assert_eq!(v["device"]["name"], "Frontdoor");
 		assert_eq!(v["availability"]["topic"], "bairelay/frontdoor/status");
 		assert_eq!(v["availability"]["payload_available"], "connected");
+	}
+
+	/// Per HA's modern entity-naming convention (post-2023):
+	///   - `has_entity_name: true` is mandatory for new integrations
+	///   - `name` is the entity-only label, NOT the device-prefixed friendly
+	///     name — HA composes friendly_name as `device.name + entity.name`
+	///   - `object_id` controls the entity_id slug, so HA generates clean
+	///     entity_ids like `sensor.frontdoor_battery` instead of the legacy
+	///     doubled `sensor.frontdoor_frontdoor_battery` form.
+	/// The camera entity is the device's primary feature, so it sets
+	/// `name: null` and omits `object_id` — entity_id becomes
+	/// `camera.<device_slug>` with no suffix.
+	#[test]
+	fn payloads_use_modern_ha_entity_naming() {
+		let f = Fixture::new("bairelay");
+		let caps = CameraCapabilitiesView { has_ptz: true };
+		let ctx = f.ctx(&caps);
+
+		// Non-primary feature: just the feature name, has_entity_name=true,
+		// object_id slug present.
+		let (_t, j) = build_battery(&ctx).expect("battery");
+		let v = parse(&j);
+		assert_eq!(v["name"], "Battery");
+		assert_eq!(v["has_entity_name"], true);
+		assert_eq!(v["object_id"], "battery");
+
+		let (_t, j) = build_motion(&ctx).expect("motion");
+		let v = parse(&j);
+		assert_eq!(v["name"], "MD");
+		assert_eq!(v["object_id"], "md");
+
+		let (_t, j) = build_floodlight_light(&ctx).expect("floodlight");
+		let v = parse(&j);
+		assert_eq!(v["name"], "Floodlight");
+		assert_eq!(v["object_id"], "floodlight");
+
+		// PT button: dynamic feature suffix.
+		let buttons = build_pt_buttons(&ctx);
+		let pan_left = buttons.iter().find(|(t, _)| t.contains("pan_left")).expect("pan_left");
+		let v = parse(&pan_left.1);
+		assert_eq!(v["name"], "Pan left");
+		assert_eq!(v["object_id"], "pan_left");
+		assert_eq!(v["has_entity_name"], true);
+
+		// Primary entity (camera): name=null, object_id omitted.
+		let (_t, j) = build_camera(&ctx).expect("camera");
+		let v = parse(&j);
+		assert!(v["name"].is_null(), "primary camera entity should have name: null");
+		assert!(v.get("object_id").map_or(true, |x| x.is_null()),
+			"primary camera entity should omit object_id");
+		assert_eq!(v["has_entity_name"], true);
 	}
 
 	#[test]
