@@ -445,6 +445,24 @@ pub struct MqttConfig {
 	#[serde(default = "default_2000")]
 	pub preview_update: u64,
 
+	/// Max width (px) the published preview JPEG is downscaled to before
+	/// encoding. Aspect ratio is preserved and images are never enlarged.
+	/// Bounds the payload so a full-res snapshot can't overflow the
+	/// broker's max packet size and wedge the shared MQTT connection.
+	#[serde(default = "default_preview_max_width")]
+	pub preview_max_width: u32,
+
+	/// JPEG quality (1..=100) the preview is re-encoded at after
+	/// downscaling. Lower trims payload size further.
+	#[serde(default = "default_preview_jpeg_quality")]
+	pub preview_jpeg_quality: u8,
+
+	/// Hard cap (bytes) on the encoded preview JPEG. If a rendered preview
+	/// still exceeds this it is dropped (not published) so one oversize
+	/// frame can't take down the connection for every camera.
+	#[serde(default = "default_preview_max_bytes")]
+	pub preview_max_bytes: usize,
+
 	#[serde(default)]
 	pub enable_floodlight: bool,
 
@@ -471,6 +489,9 @@ impl Default for MqttConfig {
 			battery_update: 2000,
 			enable_preview: true,
 			preview_update: 2000,
+			preview_max_width: 1280,
+			preview_jpeg_quality: 75,
+			preview_max_bytes: 262144,
 			enable_floodlight: false,
 			floodlight_update: 2000,
 			discovery: None,
@@ -492,6 +513,19 @@ impl From<&MqttConfig> for bairelay_mqtt::discovery::CameraEnableFlags {
 			floodlight: m.enable_floodlight,
 			light: m.enable_light,
 			pir: m.enable_pir,
+		}
+	}
+}
+
+impl From<&MqttConfig> for crate::preview_overlay::PreviewLimits {
+	/// Carry the per-camera preview size-bounding knobs into the render
+	/// path. Both preview publish sites build this from `[cameras.mqtt]`
+	/// so the downscale + guard apply identically.
+	fn from(m: &MqttConfig) -> Self {
+		Self {
+			max_width: m.preview_max_width,
+			jpeg_quality: m.preview_jpeg_quality,
+			max_bytes: m.preview_max_bytes,
 		}
 	}
 }
@@ -581,6 +615,18 @@ const fn default_true() -> bool {
 
 const fn default_2000() -> u64 {
 	2000
+}
+
+const fn default_preview_max_width() -> u32 {
+	1280
+}
+
+const fn default_preview_jpeg_quality() -> u8 {
+	75
+}
+
+const fn default_preview_max_bytes() -> usize {
+	262144
 }
 
 fn default_gap_threshold() -> f64 {
@@ -1101,6 +1147,24 @@ pub fn validate_config(config: &Config) -> Result<(), String> {
 			return Err(format!(
 				"Camera '{}': preview_update must be >= 500ms, got {}",
 				cam.name, cam.mqtt.preview_update
+			));
+		}
+		if cam.mqtt.preview_max_width < 160 {
+			return Err(format!(
+				"Camera '{}': preview_max_width must be >= 160, got {}",
+				cam.name, cam.mqtt.preview_max_width
+			));
+		}
+		if cam.mqtt.preview_jpeg_quality < 1 || cam.mqtt.preview_jpeg_quality > 100 {
+			return Err(format!(
+				"Camera '{}': preview_jpeg_quality must be between 1 and 100, got {}",
+				cam.name, cam.mqtt.preview_jpeg_quality
+			));
+		}
+		if cam.mqtt.preview_max_bytes < 4096 {
+			return Err(format!(
+				"Camera '{}': preview_max_bytes must be >= 4096, got {}",
+				cam.name, cam.mqtt.preview_max_bytes
 			));
 		}
 		if cam.mqtt.floodlight_update < 500 {

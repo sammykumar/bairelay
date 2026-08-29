@@ -1206,6 +1206,7 @@ impl CameraHandle {
 					self.config.mqtt.preview_update,
 					self.preview_state_rx(),
 					self.config.pause.preview_overlay,
+					crate::preview_overlay::PreviewLimits::from(&self.config.mqtt),
 					self.cancel.clone(),
 				)))
 			} else {
