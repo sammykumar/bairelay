@@ -235,15 +235,29 @@ pub async fn dispatch_control(
 					// One-shot render (no shared cache); cheaper than
 					// threading the per-camera OverlayCache in for a
 					// single operator-triggered query.
+					let limits =
+						crate::preview_overlay::PreviewLimits::from(&cam.config().mqtt);
 					let payload = crate::preview_overlay::rendered_preview(
 						bytes::Bytes::from(jpeg),
 						cam.config().pause.preview_overlay,
 						*cam.preview_state_rx().borrow(),
 						None,
+						limits,
 					);
-					let publisher = StatusPublisher::new(mqtt, topic_prefix, camera);
-					if let Err(e) = publisher.publish_preview(&payload).await {
-						tracing::warn!(camera = %camera, error = %e, "QueryPreview publish failed");
+					if !crate::preview_overlay::preview_within_cap(&payload, limits.max_bytes) {
+						// Oversize even after render — drop it rather than
+						// risk the broker tearing down the shared connection.
+						tracing::warn!(
+							camera = %camera,
+							bytes = payload.len(),
+							max_bytes = limits.max_bytes,
+							"QueryPreview payload exceeds cap after render; skipping publish"
+						);
+					} else {
+						let publisher = StatusPublisher::new(mqtt, topic_prefix, camera);
+						if let Err(e) = publisher.publish_preview(&payload).await {
+							tracing::warn!(camera = %camera, error = %e, "QueryPreview publish failed");
+						}
 					}
 				}
 				Ok(Err(e)) => {
@@ -1048,6 +1062,59 @@ mod tests {
 			.published()
 			.iter()
 			.any(|(t, _, _)| t == "bairelay/cam-qpov/status/preview"));
+	}
+
+	/// `QueryPreview` whose rendered payload still exceeds
+	/// `[cameras.mqtt].preview_max_bytes` is dropped by the publish-site
+	/// guard — nothing lands on `status/preview`, so an oversize frame
+	/// can't wedge the shared MQTT connection.
+	#[tokio::test]
+	async fn dispatch_query_preview_skips_when_over_cap() {
+		let jpeg: Vec<u8> = {
+			let img = image::RgbImage::from_pixel(8, 8, image::Rgb([0, 0, 0]));
+			let mut out = Vec::new();
+			image::DynamicImage::ImageRgb8(img)
+				.write_to(
+					&mut std::io::Cursor::new(&mut out),
+					image::ImageFormat::Jpeg,
+				)
+				.expect("encode");
+			out
+		};
+		let jpeg_clone = jpeg.clone();
+		let fake = FakeCameraBuilder::new()
+			.with_snapshot(move || Ok(jpeg_clone.clone()))
+			.build();
+
+		let cancel = CancellationToken::new();
+		let mut cfg = minimal_camera_config("cam-qpcap");
+		// 10-byte cap — even the tiny re-encoded JPEG blows past it.
+		cfg.mqtt.preview_max_bytes = 10;
+		let handle = Arc::new(CameraHandle::new(cfg, cancel, None));
+		let driver: Arc<dyn CameraDriver> = fake;
+		handle.set_driver_for_test(driver);
+		let mut cameras = HashMap::new();
+		cameras.insert("cam-qpcap".to_string(), handle);
+
+		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		dispatch_control(
+			ControlCommand::QueryPreview {
+				camera: "cam-qpcap".to_string(),
+			},
+			&cameras,
+			&mqtt,
+			"bairelay",
+		)
+		.await;
+
+		assert!(
+			!mock
+				.published()
+				.iter()
+				.any(|(t, _, _)| t == "bairelay/cam-qpcap/status/preview"),
+			"over-cap QueryPreview must NOT publish; observed: {:?}",
+			mock.published_topics()
+		);
 	}
 
 	/// `QueryPir` publishes the camera's PIR state on `status/pir`.

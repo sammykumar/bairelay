@@ -12,6 +12,8 @@ use std::sync::{Mutex, OnceLock};
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use bytes::Bytes;
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, ImageFormat, Rgba};
 
 use crate::preview_state::PreviewState;
@@ -211,7 +213,16 @@ impl OverlayCache {
 	/// the rendering pipeline doesn't observe partial state through the
 	/// guard, so recovering on poison loses no invariant — render the
 	/// frame fresh and overwrite the cache.
-	pub fn render(&self, jpeg: &Bytes, state: PreviewState) -> Bytes {
+	pub fn render(
+		&self,
+		jpeg: &Bytes,
+		overlay_enabled: bool,
+		state: PreviewState,
+		limits: PreviewLimits,
+	) -> Bytes {
+		// `overlay_enabled` and `limits` are constant for the lifetime of a
+		// per-camera cache, so keying on `(state, input_hash)` stays
+		// correct — the stored bytes are the fully size-bounded result.
 		let input_hash = fast_hash(jpeg);
 		{
 			let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -221,7 +232,7 @@ impl OverlayCache {
 				}
 			}
 		}
-		let rendered = render(jpeg, state);
+		let rendered = render_bounded(jpeg, overlay_enabled, state, limits);
 		*self.inner.lock().unwrap_or_else(|p| p.into_inner()) = Some(CacheEntry {
 			state,
 			input_hash,
@@ -237,7 +248,80 @@ impl Default for OverlayCache {
 	}
 }
 
-/// Apply (or skip) the preview overlay in one place. Used by the
+/// Size-bounding knobs for the preview render/publish path. Sourced from
+/// `[cameras.mqtt]` (`preview_max_width`, `preview_jpeg_quality`,
+/// `preview_max_bytes`). `max_bytes` is enforced by the publish-site
+/// guard ([`preview_within_cap`]); the other two shape the re-encode.
+#[derive(Debug, Clone, Copy)]
+pub struct PreviewLimits {
+	pub max_width: u32,
+	pub jpeg_quality: u8,
+	pub max_bytes: usize,
+}
+
+/// Shrink `img` to at most `max_width` wide, preserving aspect ratio and
+/// never enlarging. `max_width == 0` disables the downscale.
+fn downscale_to_width(img: DynamicImage, max_width: u32) -> DynamicImage {
+	let (w, h) = img.dimensions();
+	if max_width == 0 || w <= max_width {
+		return img;
+	}
+	// `resize` fits within the (max_width, h) box preserving aspect ratio.
+	// Height is the original (unchanged) so width is the binding
+	// dimension → the result is exactly `max_width` wide with proportional
+	// height. Only reached when `w > max_width`, so this never enlarges.
+	img.resize(max_width, h, FilterType::Triangle)
+}
+
+/// Encode `img` as JPEG at `quality` (1..=100). Returns `None` on encode
+/// failure so callers can fall back to the original bytes.
+fn encode_jpeg(img: &DynamicImage, quality: u8) -> Option<Bytes> {
+	let mut out = Vec::new();
+	img.write_with_encoder(JpegEncoder::new_with_quality(&mut out, quality))
+		.ok()?;
+	Some(Bytes::from(out))
+}
+
+/// Decode `jpeg`, bound its size (downscale to `limits.max_width`,
+/// re-encode at `limits.jpeg_quality`), and — when `overlay_enabled` and
+/// the state carries a caption — draw the state label first. Falls back
+/// to the original bytes on any decode/encode failure.
+///
+/// This is the single place the preview payload size is bounded. It runs
+/// for **every** state, including `Live` and with the overlay disabled,
+/// because the raw camera snapshot (a full-res 1–2 MiB JPEG) is what
+/// overflows the broker's max packet size and wedges the shared MQTT
+/// connection — the caption is incidental.
+fn render_bounded(
+	jpeg: &Bytes,
+	overlay_enabled: bool,
+	state: PreviewState,
+	limits: PreviewLimits,
+) -> Bytes {
+	let img = match image::load_from_memory_with_format(jpeg, ImageFormat::Jpeg) {
+		Ok(i) => i,
+		Err(_) => return jpeg.clone(),
+	};
+	let img = downscale_to_width(img, limits.max_width);
+	let img = match (overlay_enabled, state.caption()) {
+		(true, Some(caption)) => draw_caption(img, caption),
+		_ => img,
+	};
+	encode_jpeg(&img, limits.jpeg_quality).unwrap_or_else(|| jpeg.clone())
+}
+
+/// Whether `payload` is small enough to publish. Both preview publish
+/// sites drop anything larger (logging a warn) so a single oversize frame
+/// can't wedge the shared MQTT connection: a broker that caps message
+/// size rejects the oversize PUBLISH and tears the connection down for
+/// every camera. `max_bytes` bounds the JPEG bytes; base64 inflates that
+/// by ~4/3 on the wire, so the default 256 KiB cap stays comfortably
+/// under a ~1 MiB broker limit (~341 KiB base64).
+pub fn preview_within_cap(payload: &[u8], max_bytes: usize) -> bool {
+	payload.len() <= max_bytes
+}
+
+/// Apply the size-bounding preview render in one place. Used by the
 /// periodic preview poller (with a long-lived cache) and the
 /// `QueryPreview` MQTT handler (`cache = None` for a one-shot render).
 /// Returning `Bytes` keeps both call sites at ref-count assignment cost.
@@ -246,13 +330,11 @@ pub fn rendered_preview(
 	overlay_enabled: bool,
 	state: PreviewState,
 	cache: Option<&OverlayCache>,
+	limits: PreviewLimits,
 ) -> Bytes {
-	if !overlay_enabled {
-		return jpeg;
-	}
 	match cache {
-		Some(c) => c.render(&jpeg, state),
-		None => render(&jpeg, state),
+		Some(c) => c.render(&jpeg, overlay_enabled, state, limits),
+		None => render_bounded(&jpeg, overlay_enabled, state, limits),
 	}
 }
 
@@ -277,6 +359,43 @@ mod tests {
 			)
 			.expect("encode sample");
 		Bytes::from(out)
+	}
+
+	/// Production-default preview limits (mirrors the `[cameras.mqtt]`
+	/// serde defaults) for the render/cache tests.
+	fn limits() -> PreviewLimits {
+		PreviewLimits {
+			max_width: 1280,
+			jpeg_quality: 75,
+			max_bytes: 262144,
+		}
+	}
+
+	/// Encode an `w`x`h` deterministic diagonal gradient as JPEG. Gradients
+	/// compress like a real camera scene (unlike random noise, which is
+	/// pathological for JPEG at low resolutions).
+	fn gradient_jpeg(w: u32, h: u32) -> Bytes {
+		let img = image::RgbImage::from_fn(w, h, |x, y| {
+			image::Rgb([
+				((x * 255) / w.max(1)) as u8,
+				((y * 255) / h.max(1)) as u8,
+				(((x + y) * 255) / (w + h).max(1)) as u8,
+			])
+		});
+		let mut out = Vec::new();
+		image::DynamicImage::ImageRgb8(img)
+			.write_to(
+				&mut std::io::Cursor::new(&mut out),
+				image::ImageFormat::Jpeg,
+			)
+			.expect("encode gradient");
+		Bytes::from(out)
+	}
+
+	fn decoded_dims(jpeg: &Bytes) -> (u32, u32) {
+		image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg)
+			.expect("decode rendered jpeg")
+			.dimensions()
 	}
 
 	#[test]
@@ -312,8 +431,8 @@ mod tests {
 	fn cache_serves_repeat_request_from_storage() {
 		let cache = OverlayCache::new();
 		let src = sample_jpeg();
-		let a = cache.render(&src, PreviewState::Sleeping);
-		let b = cache.render(&src, PreviewState::Sleeping);
+		let a = cache.render(&src, true, PreviewState::Sleeping, limits());
+		let b = cache.render(&src, true, PreviewState::Sleeping, limits());
 		assert_eq!(a, b);
 	}
 
@@ -321,8 +440,8 @@ mod tests {
 	fn cache_invalidates_on_state_change() {
 		let cache = OverlayCache::new();
 		let src = sample_jpeg();
-		let a = cache.render(&src, PreviewState::Sleeping);
-		let b = cache.render(&src, PreviewState::Connecting);
+		let a = cache.render(&src, true, PreviewState::Sleeping, limits());
+		let b = cache.render(&src, true, PreviewState::Connecting, limits());
 		assert_ne!(a, b);
 	}
 
@@ -334,8 +453,8 @@ mod tests {
 		let b = OverlayCache::new();
 		let src = sample_jpeg();
 		assert_eq!(
-			a.render(&src, PreviewState::Sleeping),
-			b.render(&src, PreviewState::Sleeping)
+			a.render(&src, true, PreviewState::Sleeping, limits()),
+			b.render(&src, true, PreviewState::Sleeping, limits())
 		);
 	}
 
@@ -373,8 +492,78 @@ mod tests {
 		// cache hit path).
 		let cache = OverlayCache::new();
 		let src = sample_jpeg();
-		let a = cache.render(&src, PreviewState::Connecting);
-		let b = cache.render(&src, PreviewState::Connecting);
+		let a = cache.render(&src, true, PreviewState::Connecting, limits());
+		let b = cache.render(&src, true, PreviewState::Connecting, limits());
 		assert_eq!(a, b);
+	}
+
+	// ── Size-bounding regression tests (fix/preview-size-cap) ────────────
+
+	#[test]
+	fn large_image_renders_under_cap_and_downscales() {
+		// A full-res 4K frame must come out under the byte cap and shrunk
+		// to the bounded width — this is the outage the cap prevents (the
+		// broker rejects an oversize PUBLISH and drops the shared MQTT
+		// connection).
+		let src = gradient_jpeg(3840, 2160);
+		let out = rendered_preview(src.clone(), true, PreviewState::Live, None, limits());
+		assert!(
+			out.len() <= limits().max_bytes,
+			"rendered 4K preview {} B exceeds cap {} B",
+			out.len(),
+			limits().max_bytes
+		);
+		let (w, h) = decoded_dims(&out);
+		assert_eq!((w, h), (1280, 720), "4K frame must downscale to 1280x720");
+		// Downscaling actually shrinks the payload vs. re-encoding at full
+		// resolution (more pixels → larger JPEG at the same quality).
+		let full = encode_jpeg(
+			&image::load_from_memory_with_format(&src, ImageFormat::Jpeg).unwrap(),
+			limits().jpeg_quality,
+		)
+		.unwrap();
+		assert!(
+			out.len() < full.len(),
+			"downscale did not reduce size: {} vs full {}",
+			out.len(),
+			full.len()
+		);
+	}
+
+	#[test]
+	fn downscale_preserves_aspect_and_never_enlarges() {
+		// Small frame passes through at its original dimensions (never
+		// upscaled to max_width).
+		let small = gradient_jpeg(320, 240);
+		let out_small = rendered_preview(small, true, PreviewState::Live, None, limits());
+		assert_eq!(
+			decoded_dims(&out_small),
+			(320, 240),
+			"small frame must not be enlarged"
+		);
+
+		// Oversize frame shrinks to max_width with aspect ratio preserved
+		// (2000x1000 → 1280x640).
+		let big = gradient_jpeg(2000, 1000);
+		let out_big = rendered_preview(big, true, PreviewState::Live, None, limits());
+		assert_eq!(
+			decoded_dims(&out_big),
+			(1280, 640),
+			"oversize frame must shrink to max_width preserving aspect"
+		);
+	}
+
+	#[test]
+	fn guard_rejects_oversize_payload() {
+		let cap = 262144usize;
+		assert!(
+			!preview_within_cap(&vec![0u8; cap + 1], cap),
+			"payload above the cap must be rejected"
+		);
+		assert!(
+			preview_within_cap(&vec![0u8; cap], cap),
+			"payload exactly at the cap must be allowed"
+		);
+		assert!(preview_within_cap(&[], cap), "empty payload is allowed");
 	}
 }

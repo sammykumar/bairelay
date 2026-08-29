@@ -15,7 +15,7 @@ use bairelay_mqtt::{SharedMqttClient, StatusPublisher};
 use bairelay_rtsp::buffer::LastFrameBuffer;
 
 use crate::camera::ReconnectBackoff;
-use crate::preview_overlay::OverlayCache;
+use crate::preview_overlay::{OverlayCache, PreviewLimits};
 use crate::preview_state::PreviewState;
 use crate::status_cache::StatusCache;
 use crate::wake_lock::{WakeLockCounter, WakeLockGuard};
@@ -181,9 +181,12 @@ pub async fn battery_poller(
 /// `query/preview` command and the RTSP placeholder path both see up-to-
 /// date content.
 ///
-/// Oversized JPEGs (>32 KiB raw) are skipped with a one-shot warn so the
-/// poller doesn't kick tight brokers (some mosquitto configs reject
-/// payloads larger than ~10 KiB; 4K snapshots are 1–2 MiB).
+/// The rendered preview is downscaled and re-encoded to a bounded size
+/// (see [`crate::preview_overlay::rendered_preview`] / `limits`). Any frame
+/// that still exceeds `limits.max_bytes` after rendering is dropped with a
+/// warn rather than published — a broker that caps message size rejects an
+/// oversize PUBLISH and tears down the shared MQTT connection for every
+/// camera, so one 1–2 MiB 4K snapshot must never reach the wire.
 #[allow(clippy::too_many_arguments)]
 pub async fn preview_poller(
 	camera_name: String,
@@ -194,6 +197,7 @@ pub async fn preview_poller(
 	interval_ms: u64,
 	mut preview_state_rx: watch::Receiver<PreviewState>,
 	preview_overlay_enabled: bool,
+	limits: PreviewLimits,
 	cancel: CancellationToken,
 ) {
 	const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -254,9 +258,22 @@ pub async fn preview_poller(
 					preview_overlay_enabled,
 					*preview_state_rx.borrow_and_update(),
 					Some(&overlay_cache),
+					limits,
 				);
 
-				if let Err(e) = publisher.publish_preview(&payload).await {
+				if !crate::preview_overlay::preview_within_cap(&payload, limits.max_bytes) {
+					// Rendering still produced an oversize payload (e.g. an
+					// undecodable snapshot that fell through unchanged).
+					// Skip it — publishing would risk the broker rejecting
+					// the PUBLISH and dropping the connection for every
+					// camera on the shared client.
+					tracing::warn!(
+						camera = %camera_name,
+						bytes = payload.len(),
+						max_bytes = limits.max_bytes,
+						"preview payload exceeds cap after render; skipping publish"
+					);
+				} else if let Err(e) = publisher.publish_preview(&payload).await {
 					// If the broker advertises a lower MaxPacketSize the
 					// send is rejected here — log as warn so operators see
 					// they may need to raise broker message_size_limit.
@@ -714,6 +731,11 @@ mod tests {
 		Bytes::from(out)
 	}
 
+	/// Production-default preview limits for the poller tests.
+	fn test_preview_limits() -> PreviewLimits {
+		PreviewLimits::from(&crate::config::MqttConfig::default())
+	}
+
 	#[test]
 	fn overlay_applies_when_enabled_and_not_live() {
 		let jpeg = fake_jpeg();
@@ -783,6 +805,7 @@ mod tests {
 			10, // 10 ms — fast tick for the test
 			rx,
 			true,
+			test_preview_limits(),
 			cancel,
 		)
 		.await;
@@ -797,6 +820,69 @@ mod tests {
 				.iter()
 				.any(|t| t == "bairelay/cam-preview-test/status/preview"),
 			"preview poller did not publish to status/preview; topics seen: {:?}",
+			topics
+		);
+	}
+
+	/// The publish-site guard drops a payload that still exceeds
+	/// `limits.max_bytes` after rendering: with a 10-byte cap, even the
+	/// downscaled fake JPEG is over-cap, so NOTHING lands on
+	/// `status/preview`. Protects the shared MQTT connection from an
+	/// oversize frame taking it down for every camera.
+	#[tokio::test]
+	async fn preview_poller_skips_publish_when_over_cap() {
+		use crate::camera::CameraHandle;
+		use crate::config::test_helpers::minimal_camera_config;
+
+		let last_frame = Arc::new(LastFrameBuffer::new());
+		last_frame.set_jpeg(fake_jpeg());
+
+		let cancel = CancellationToken::new();
+		let handle = Arc::new(CameraHandle::new(
+			minimal_camera_config("cam-over-cap"),
+			cancel.clone(),
+			None,
+		));
+
+		let (mqtt, mqtt_handle) = bairelay_mqtt::test_support::mock_client();
+		let rx = handle.preview_state_rx();
+
+		// A deliberately tiny cap that any real JPEG blows past. Direct
+		// construction bypasses config validation (which floors this at
+		// 4096) — that's fine, we're exercising the runtime guard.
+		let tiny = PreviewLimits {
+			max_width: 1280,
+			jpeg_quality: 75,
+			max_bytes: 10,
+		};
+
+		let cancel_task = cancel.clone();
+		let task = tokio::spawn(async move {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			cancel_task.cancel();
+		});
+
+		preview_poller(
+			"cam-over-cap".to_string(),
+			Arc::clone(&handle),
+			Arc::clone(&last_frame),
+			mqtt,
+			"bairelay".to_string(),
+			10,
+			rx,
+			true,
+			tiny,
+			cancel,
+		)
+		.await;
+		let _ = task.await;
+
+		let topics = mqtt_handle.published_topics();
+		assert!(
+			!topics
+				.iter()
+				.any(|t| t == "bairelay/cam-over-cap/status/preview"),
+			"over-cap preview must NOT be published; topics seen: {:?}",
 			topics
 		);
 	}
@@ -836,6 +922,7 @@ mod tests {
 			10,
 			rx,
 			false, // disable overlay
+			test_preview_limits(),
 			cancel,
 		)
 		.await;
@@ -1279,6 +1366,7 @@ mod tests {
 			10,
 			rx,
 			false,
+			test_preview_limits(),
 			cancel,
 		)
 		.await;
@@ -1333,6 +1421,7 @@ mod tests {
 			10,
 			rx,
 			false,
+			test_preview_limits(),
 			cancel,
 		)
 		.await;
@@ -1373,6 +1462,7 @@ mod tests {
 			10,
 			rx,
 			true,
+			test_preview_limits(),
 			cancel,
 		)
 		.await;
