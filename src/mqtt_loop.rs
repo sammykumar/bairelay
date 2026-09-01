@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bairelay_mqtt::{Event, Packet, SharedMqttClient, StatusPublisher};
+use bairelay_mqtt::{Event, Packet, SharedMqttClient};
 
 use crate::camera::CameraHandle;
 use crate::config::Config;
@@ -56,21 +56,23 @@ pub fn build_broker_config(config: &Config) -> Option<bairelay_mqtt::MqttConfig>
 	})
 }
 
-/// Publish "disconnected" availability for every camera, then
-/// unpublish HA discovery config for cameras whose `CameraHandle`
-/// had one attached. Wrapped under a 2 s hard timeout by the caller.
-/// Returns nothing — per-camera errors are logged and elided so a
-/// single bad publish doesn't abort the shutdown fan-out.
+/// Publish the bridge-wide "offline" availability marker, then unpublish
+/// HA discovery config for cameras whose `CameraHandle` had one attached.
+/// Wrapped under a 2 s hard timeout by the caller. Returns nothing —
+/// per-camera errors are logged and elided so a single bad publish
+/// doesn't abort the shutdown fan-out.
+///
+/// The offline publish targets the same `{prefix}/status` topic + payload
+/// as the MQTT Last-Will, so a graceful shutdown marks every entity
+/// unavailable exactly as a crash would — replacing the former per-camera
+/// `disconnected` fan-out, which wrote to `{prefix}/{cam}/status` that no
+/// entity's `availability` block references anymore.
 pub async fn publish_shutdown_fanout(
-	camera_names: &[String],
 	cameras: &HashMap<String, Arc<CameraHandle>>,
 	mqtt: &SharedMqttClient,
 	topic_prefix: &str,
 ) {
-	for name in camera_names {
-		let publisher = StatusPublisher::new(mqtt, topic_prefix, name);
-		let _ = publisher.publish_connection(false).await;
-	}
+	let _ = bairelay_mqtt::publish_bridge_unavailable(mqtt, topic_prefix).await;
 	for (name, cam) in cameras.iter() {
 		if let Err(e) = cam.unpublish_discovery().await {
 			tracing::warn!(
@@ -219,6 +221,19 @@ pub async fn handle_connack(
 	topic_prefix: &str,
 ) {
 	tracing::info!("MQTT broker connected");
+
+	// Re-arm HA availability for the whole fleet: publish the bridge
+	// "online" marker (retained) on `{prefix}/status`, the single topic
+	// every entity's `availability` block references. Done on every
+	// ConnAck so a broker restart (which drops retained state) restores
+	// availability without waking any camera, and so it clears any
+	// retained Last-Will "offline" left by a prior crash. Availability is
+	// deliberately decoupled from the per-camera media session — an
+	// `idle_disconnect` cycle no longer flips it.
+	if let Err(e) = bairelay_mqtt::publish_bridge_available(mqtt, topic_prefix).await {
+		tracing::warn!(error = %e, "Failed to publish bridge availability on ConnAck");
+	}
+
 	// Subscribe all cameras (not just connected ones — we need to
 	// receive wakeup commands for sleeping cameras too). When the
 	// broker is misbehaving every camera fails in the same way; log
@@ -413,11 +428,18 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn handle_connack_with_empty_cameras_is_noop() {
-		let (mqtt, _mock) = bairelay_mqtt::test_support::mock_client();
+	async fn handle_connack_with_empty_cameras_only_publishes_bridge_online() {
+		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
 		let cameras: HashMap<String, Arc<CameraHandle>> = HashMap::new();
 		handle_connack(&cameras, &mqtt, "bairelay").await;
-		// No panic, no assertions — just the empty-loop path.
+		// With no cameras the subscribe / discovery / cache-republish
+		// loops are all empty, so the single retained bridge-online
+		// availability publish is the only side effect.
+		let rows = mock.published();
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].0, "bairelay/status");
+		assert_eq!(rows[0].1, bairelay_mqtt::BRIDGE_AVAILABLE.as_bytes());
+		assert!(rows[0].2, "availability publish must be retained");
 	}
 
 	use crate::config::{Config, MqttServerConfig, UserConfig};
@@ -508,26 +530,47 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn publish_shutdown_fanout_is_noop_on_empty_input() {
+	async fn publish_shutdown_fanout_publishes_bridge_offline_even_with_no_cameras() {
 		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
 		let cameras: HashMap<String, Arc<CameraHandle>> = HashMap::new();
-		publish_shutdown_fanout(&[], &cameras, &mqtt, "bairelay").await;
-		assert_eq!(mock.count(), 0);
+		publish_shutdown_fanout(&cameras, &mqtt, "bairelay").await;
+		// The bridge-wide "offline" availability publish is
+		// unconditional — it doesn't depend on any camera being present.
+		let rows = mock.published();
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].0, "bairelay/status");
+		assert_eq!(rows[0].1, bairelay_mqtt::BRIDGE_NOT_AVAILABLE.as_bytes());
+		assert!(rows[0].2, "availability publish must be retained");
 	}
 
 	#[tokio::test]
-	async fn publish_shutdown_fanout_publishes_one_disconnect_per_camera_name() {
+	async fn publish_shutdown_fanout_offline_publish_targets_bridge_topic() {
 		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
 		let cameras: HashMap<String, Arc<CameraHandle>> = HashMap::new();
-		publish_shutdown_fanout(
-			&["cam-a".to_string(), "cam-b".to_string()],
-			&cameras,
-			&mqtt,
-			"bairelay",
-		)
-		.await;
-		// One disconnect publish per name.
-		assert!(mock.count() >= 2, "expected at least 2 publishes");
+		publish_shutdown_fanout(&cameras, &mqtt, "neolink").await;
+		assert!(
+			mock.published()
+				.iter()
+				.any(|(t, p, r)| t == "neolink/status"
+					&& p == bairelay_mqtt::BRIDGE_NOT_AVAILABLE.as_bytes()
+					&& *r),
+			"graceful shutdown must publish bridge offline on the prefix's status topic"
+		);
+	}
+
+	#[tokio::test]
+	async fn handle_connack_publishes_bridge_online() {
+		let (mqtt, mock) = bairelay_mqtt::test_support::mock_client();
+		let cameras: HashMap<String, Arc<CameraHandle>> = HashMap::new();
+		handle_connack(&cameras, &mqtt, "bairelay").await;
+		assert!(
+			mock.published()
+				.iter()
+				.any(|(t, p, r)| t == "bairelay/status"
+					&& p == bairelay_mqtt::BRIDGE_AVAILABLE.as_bytes()
+					&& *r),
+			"ConnAck must (re)arm HA availability via a retained bridge-online publish"
+		);
 	}
 
 	#[tokio::test]

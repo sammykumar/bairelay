@@ -7,6 +7,45 @@ use crate::client::SharedMqttClient;
 use crate::error::MqttError;
 use crate::topics;
 
+/// Payload published on the bridge availability topic
+/// ([`topics::bridge_status`]) while the bridge is alive. Every HA
+/// entity's `availability.payload_available` is this exact string, so
+/// the discovery config and the runtime publish can't drift.
+pub const BRIDGE_AVAILABLE: &str = "online";
+
+/// Payload published on the bridge availability topic when the bridge
+/// stops. Registered as the MQTT Last-Will so the broker emits it on an
+/// ungraceful crash, and published explicitly on graceful shutdown.
+/// Mirrored into every entity's `availability.payload_not_available`.
+pub const BRIDGE_NOT_AVAILABLE: &str = "offline";
+
+/// Publish the bridge-alive marker (`"online"`, retained) on the global
+/// availability topic. Called on every broker `ConnAck` so a broker
+/// restart (which wipes retained state) re-arms HA availability without
+/// waking any camera.
+pub async fn publish_bridge_available(
+	client: &SharedMqttClient,
+	topic_prefix: &str,
+) -> Result<(), MqttError> {
+	let topic = topics::bridge_status(topic_prefix);
+	client
+		.publish_retained(&topic, BRIDGE_AVAILABLE.as_bytes())
+		.await
+}
+
+/// Publish the bridge-down marker (`"offline"`, retained) on the global
+/// availability topic. Used on graceful shutdown to mirror what the
+/// broker publishes via the Last-Will on a crash.
+pub async fn publish_bridge_unavailable(
+	client: &SharedMqttClient,
+	topic_prefix: &str,
+) -> Result<(), MqttError> {
+	let topic = topics::bridge_status(topic_prefix);
+	client
+		.publish_retained(&topic, BRIDGE_NOT_AVAILABLE.as_bytes())
+		.await
+}
+
 /// Wire-format JSON payload published on the floodlight state topic.
 /// Matches neolink's `DiscoveryLight.state_value_template = "{{ value_json.state }}"`,
 /// so HA can template the state off the `state` key. Exposed so tests
@@ -148,6 +187,30 @@ mod tests {
 		let pub_ = StatusPublisher::new(&c, &p, &n);
 		pub_.publish_connection(true).await.unwrap();
 		pub_.publish_connection(false).await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn publish_bridge_available_lands_online_retained_on_bridge_topic() {
+		let (client, mock) = crate::test_support::mock_client();
+		publish_bridge_available(&client, "bairelay").await.unwrap();
+		let rows = mock.published();
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].0, "bairelay/status");
+		assert_eq!(rows[0].1, BRIDGE_AVAILABLE.as_bytes());
+		assert!(rows[0].2, "availability publish must be retained");
+	}
+
+	#[tokio::test]
+	async fn publish_bridge_unavailable_lands_offline_retained_on_bridge_topic() {
+		let (client, mock) = crate::test_support::mock_client();
+		publish_bridge_unavailable(&client, "neolink")
+			.await
+			.unwrap();
+		let rows = mock.published();
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].0, "neolink/status");
+		assert_eq!(rows[0].1, BRIDGE_NOT_AVAILABLE.as_bytes());
+		assert!(rows[0].2, "availability publish must be retained");
 	}
 
 	#[tokio::test]

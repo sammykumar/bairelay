@@ -118,8 +118,12 @@ pub struct DiscoveryDevice {
 	pub sw_version: Option<String>,
 }
 
-/// HA availability block. `payload_not_available` intentionally
-/// omitted — HA treats any other value as unavailable.
+/// HA availability block. Points at the bridge-wide liveness topic
+/// (`{prefix}/status`) with explicit `payload_available` /
+/// `payload_not_available` matching the bridge's online marker and its
+/// MQTT Last-Will, so an entity is available while the bridge process is
+/// alive and unavailable only when the bridge stops — decoupled from the
+/// transient per-camera media session.
 #[derive(Serialize, Debug, Clone)]
 pub struct DiscoveryAvailability {
 	pub topic: String,
@@ -302,9 +306,9 @@ fn unique(prefix: &str, cam: &str, suffix: &str) -> String {
 
 fn availability_block(ctx: &DiscoveryContext) -> DiscoveryAvailability {
 	DiscoveryAvailability {
-		topic: format!("{}/{}/status", ctx.topic_prefix, ctx.camera_name),
-		payload_available: Some("connected".to_string()),
-		payload_not_available: None,
+		topic: crate::topics::bridge_status(ctx.topic_prefix),
+		payload_available: Some(crate::status::BRIDGE_AVAILABLE.to_string()),
+		payload_not_available: Some(crate::status::BRIDGE_NOT_AVAILABLE.to_string()),
 	}
 }
 
@@ -707,8 +711,34 @@ mod tests {
 		assert_eq!(v["device"]["model"], "Bairelay");
 		assert_eq!(v["device"]["identifiers"][0], "bairelay_frontdoor");
 		assert_eq!(v["device"]["name"], "Frontdoor");
-		assert_eq!(v["availability"]["topic"], "bairelay/frontdoor/status");
-		assert_eq!(v["availability"]["payload_available"], "connected");
+		assert_eq!(v["availability"]["topic"], "bairelay/status");
+		assert_eq!(v["availability"]["payload_available"], "online");
+		assert_eq!(v["availability"]["payload_not_available"], "offline");
+	}
+
+	#[test]
+	fn availability_block_is_bridge_wide_not_per_camera() {
+		// Regression for the availability-decouple fix: every entity's
+		// availability must key off the single bridge topic
+		// (`{prefix}/status`), NOT the per-camera media-session topic
+		// (`{prefix}/{cam}/status`). The original bug was that these two
+		// drifted onto different topics, so the Last-Will never marked
+		// entities unavailable and an idle-disconnect wrongly did.
+		let f = Fixture::new("bairelay");
+		let caps = CameraCapabilitiesView::default();
+		let ctx = f.ctx(&caps);
+		let block = availability_block(&ctx);
+		assert_eq!(block.topic, crate::topics::bridge_status("bairelay"));
+		assert_eq!(block.topic, "bairelay/status");
+		assert_ne!(block.topic, crate::topics::status("bairelay", "frontdoor"));
+		assert_eq!(
+			block.payload_available.as_deref(),
+			Some(crate::status::BRIDGE_AVAILABLE)
+		);
+		assert_eq!(
+			block.payload_not_available.as_deref(),
+			Some(crate::status::BRIDGE_NOT_AVAILABLE)
+		);
 	}
 
 	#[test]

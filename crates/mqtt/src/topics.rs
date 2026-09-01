@@ -6,6 +6,24 @@
 //! deployment). Every helper is a pure function of `(prefix, cam)` —
 //! no global state, no hidden defaults.
 
+// ── Bridge-wide availability ────────────────────────────────────────────
+
+/// Bridge liveness / HA availability topic: `{prefix}/status`.
+///
+/// This is the single topic every HA entity's `availability.topic` points
+/// at, so an entity is `available` while the bridge process is alive and
+/// goes `unavailable` only when the broker fires the Last-Will (bridge
+/// died) or the bridge publishes the offline payload on graceful shutdown.
+///
+/// Deliberately camera-agnostic: MQTT permits exactly one Last-Will per
+/// connection and the bridge holds a single shared connection for the
+/// whole fleet, so bridge-liveness is inherently a global signal. Entity
+/// availability is decoupled from the transient per-camera media session
+/// (`{prefix}/{cam}/status`), which cycles on every `idle_disconnect`.
+pub fn bridge_status(prefix: &str) -> String {
+	format!("{prefix}/status")
+}
+
 // ── Status topics ──────────────────────────────────────────────────────
 
 /// Camera online/offline status: `{prefix}/{cam}/status`

@@ -10,7 +10,10 @@ pub use client::{connect, MqttConfig, MqttEventLoop, SharedMqttClient};
 pub use control::{parse_control_message, ControlCommand};
 pub use discovery::{CameraEnableFlags, DiscoveryPublisher};
 pub use error::MqttError;
-pub use status::StatusPublisher;
+pub use status::{
+	publish_bridge_available, publish_bridge_unavailable, StatusPublisher, BRIDGE_AVAILABLE,
+	BRIDGE_NOT_AVAILABLE,
+};
 
 // Re-export rumqttc types needed by the event loop consumer + tests.
 pub use rumqttc::{ConnAck, ConnectReturnCode, Event, Outgoing, Packet, Publish, QoS};

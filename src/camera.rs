@@ -914,14 +914,12 @@ impl CameraHandle {
 		self.set_preview_state(PreviewState::Live);
 		tracing::info!(camera = %self.config.name, "Connected");
 
-		// Publish connected status via MQTT.
-		if let Some(ref mqtt) = self.mqtt_client {
-			let publisher =
-				bairelay_mqtt::StatusPublisher::new(mqtt, &self.topic_prefix, &self.config.name);
-			if let Err(e) = publisher.publish_connection(true).await {
-				tracing::warn!(camera = %self.config.name, error = %e, "Failed to publish connected status");
-			}
-		}
+		// Note: HA entity availability is intentionally NOT published here.
+		// Availability keys off the bridge-wide `{prefix}/status` topic
+		// (published on MQTT ConnAck / Last-Will), so a media session
+		// coming up or an `idle_disconnect` tearing it down must not flip
+		// an entity between available/unavailable. See
+		// `mqtt_loop::handle_connack` and `topics::bridge_status`.
 
 		*self.bc_camera.write_recover() = Some(Arc::clone(&driver));
 		*self.bc_camera_concrete.write_recover() = concrete.clone();
@@ -1170,23 +1168,21 @@ impl CameraHandle {
 		self.set_state(CameraState::Disconnected);
 		tracing::info!(camera = %self.config.name, "Disconnected");
 
-		// Publish disconnected status via MQTT.
-		if let Some(ref mqtt) = self.mqtt_client {
-			let publisher =
-				bairelay_mqtt::StatusPublisher::new(mqtt, &self.topic_prefix, &self.config.name);
-			if let Err(e) = publisher.publish_connection(false).await {
-				tracing::warn!(camera = %self.config.name, error = %e, "Failed to publish disconnected status");
-			}
-		}
+		// Note: no MQTT availability publish on teardown. Tearing down the
+		// media session (including the routine `idle_disconnect` cycle on
+		// battery cameras) must NOT mark HA entities unavailable — that is
+		// driven solely by bridge liveness on `{prefix}/status`.
 	}
 
 	/// Main connection loop: connect, keepalive, reconnect on failure.
 	pub async fn run(self: &Arc<Self>) {
-		// Publish initial "disconnected" / "unknown" states before connecting.
+		// Publish the initial motion "unknown" state before connecting.
+		// (No availability publish here: entity availability is bridge-
+		// wide via `{prefix}/status`, not per-camera — see
+		// `run_connected_session` and `mqtt_loop::handle_connack`.)
 		if let Some(ref mqtt) = self.mqtt_client {
 			let publisher =
 				bairelay_mqtt::StatusPublisher::new(mqtt, &self.topic_prefix, &self.config.name);
-			let _ = publisher.publish_connection(false).await;
 			let _ = publisher.publish_motion_unknown().await;
 		}
 
@@ -2208,12 +2204,14 @@ mod tests {
 		assert!(saw_sleeping, "idle_disconnect loop must flip to Sleeping");
 	}
 
-	/// `run()` with an MQTT client publishes `status/connection = off`
-	/// and a motion-unknown payload before entering the connect loop
-	/// (lines 736-741). Parks via `idle_disconnect` so the network
-	/// attempt never fires.
+	/// `run()` with an MQTT client publishes a motion-unknown payload
+	/// before entering the connect loop, and — post availability-decouple
+	/// — must NOT publish any per-camera `status` availability value.
+	/// Availability is bridge-wide (`{prefix}/status`), so a parked
+	/// battery camera never marks its own entities unavailable. Parks via
+	/// `idle_disconnect` so the network attempt never fires.
 	#[tokio::test]
-	async fn run_publishes_initial_disconnected_status_when_mqtt_present() {
+	async fn run_publishes_initial_motion_unknown_without_touching_availability() {
 		use crate::config::test_helpers::minimal_camera_config;
 		use tokio_util::sync::CancellationToken;
 
@@ -2228,13 +2226,13 @@ mod tests {
 			tokio::spawn(async move { h.run().await })
 		};
 
-		let saw_init = tokio::time::timeout(Duration::from_secs(2), async {
+		let saw_motion_unknown = tokio::time::timeout(Duration::from_secs(2), async {
 			loop {
 				let rows = mock.published();
-				let has_conn = rows
+				let has_motion = rows
 					.iter()
-					.any(|(t, p, _)| t == "bairelay/cam-init/status" && p == b"disconnected");
-				if has_conn {
+					.any(|(t, p, _)| t == "bairelay/cam-init/status/motion" && p == b"unknown");
+				if has_motion {
 					return true;
 				}
 				tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2245,9 +2243,26 @@ mod tests {
 
 		cancel.cancel();
 		let _ = tokio::time::timeout(Duration::from_secs(5), run_handle).await;
+
 		assert!(
-			saw_init,
-			"initial disconnected publish must land on connection topic; observed: {:?}",
+			saw_motion_unknown,
+			"initial motion-unknown publish must land; observed: {:?}",
+			mock.published_topics()
+		);
+		// Availability decoupled: the per-camera media-session topic must
+		// never carry a connected/disconnected value, and the bridge
+		// availability topic is owned by the MQTT loop, not the camera task.
+		let pubs = mock.published();
+		assert!(
+			!pubs
+				.iter()
+				.any(|(t, _, _)| t == "bairelay/cam-init/status"),
+			"camera task must not publish per-camera availability; observed: {:?}",
+			mock.published_topics()
+		);
+		assert!(
+			!pubs.iter().any(|(t, _, _)| t == "bairelay/status"),
+			"camera task must not touch the bridge availability topic; observed: {:?}",
 			mock.published_topics()
 		);
 	}
@@ -2607,8 +2622,8 @@ mod tests {
 	/// keepalive loop fires MAX_FAILURES ticks and returns; teardown
 	/// then runs synchronously. Asserts on:
 	/// - state Connected → Disconnected transition
-	/// - publish_connection(true) + publish_connection(false) both
-	///   emitted on the MQTT mock
+	/// - NO availability publish across the whole session (availability is
+	///   bridge-wide, decoupled from the media session)
 	/// - bc_camera cleared on exit
 	/// - session-task span covered (motion, battery, floodlight,
 	///   publish_pir_state) — configured via `enable_*` flags.
@@ -2702,21 +2717,26 @@ mod tests {
 		let caps = handle.capabilities().expect("caps populated from fake");
 		assert!(caps.has_ptz);
 
-		// Both initial publish_connection(true) and final
-		// publish_connection(false) emitted on the broker.
+		// Availability decouple: a full media-session lifecycle
+		// (connect → keepalive failures → teardown) must NOT publish any
+		// availability value. The per-camera `{prefix}/{cam}/status` topic
+		// carries no connected/disconnected, and the bridge availability
+		// topic `{prefix}/status` is owned by the MQTT event loop, not the
+		// camera session — so an `idle_disconnect` cycle can't flip HA
+		// entity availability. This is the core regression guard.
 		let pubs = mock.published();
-		let conn_on = pubs
-			.iter()
-			.any(|(t, p, _)| t == "bairelay/cam-sess/status" && p == b"connected");
-		let conn_off = pubs
-			.iter()
-			.any(|(t, p, _)| t == "bairelay/cam-sess/status" && p == b"disconnected");
 		assert!(
-			conn_on,
-			"publish_connection(true) must land; topics: {:?}",
+			!pubs
+				.iter()
+				.any(|(t, _, _)| t == "bairelay/cam-sess/status"),
+			"session lifecycle must not publish per-camera availability; topics: {:?}",
 			mock.published_topics()
 		);
-		assert!(conn_off, "publish_connection(false) must land at teardown");
+		assert!(
+			!pubs.iter().any(|(t, _, _)| t == "bairelay/status"),
+			"session lifecycle must not touch the bridge availability topic; topics: {:?}",
+			mock.published_topics()
+		);
 
 		// publish_pir_state ran (configured enable_pir = true).
 		let pir_published = pubs
