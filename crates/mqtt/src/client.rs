@@ -228,10 +228,27 @@ impl MqttEventLoop {
 	}
 }
 
+/// Build the bridge-wide MQTT Last-Will: publishes
+/// [`crate::status::BRIDGE_NOT_AVAILABLE`] (`"offline"`, retained) on
+/// [`topics::bridge_status`] (`{topic_prefix}/status`) if the connection
+/// drops ungracefully. This is the exact topic + payload every HA
+/// entity's `availability` block references, so a crash marks the whole
+/// fleet unavailable. Kept as a named fn so [`connect`]'s production path
+/// and its test share one source of truth — the discovery block and the
+/// LWT drifting onto different topics was the original availability bug.
+fn bridge_last_will(topic_prefix: &str) -> LastWill {
+	LastWill::new(
+		topics::bridge_status(topic_prefix),
+		crate::status::BRIDGE_NOT_AVAILABLE,
+		QoS::AtLeastOnce,
+		true,
+	)
+}
+
 /// Create an MQTT connection, returning the shared client and event loop.
 ///
-/// Sets a Last Will message on `{topic_prefix}/status` with payload
-/// `"offline"` so the broker publishes it if the bridge disconnects
+/// Registers the bridge Last-Will via [`bridge_last_will`] so the broker
+/// marks every HA entity unavailable if the bridge disconnects
 /// unexpectedly. `topic_prefix` is the `mqtt.topic_prefix` config value
 /// (default `"bairelay"`; `"neolink"` for legacy migration).
 pub fn connect(
@@ -240,12 +257,7 @@ pub fn connect(
 	topic_prefix: &str,
 ) -> Result<(SharedMqttClient, MqttEventLoop), MqttError> {
 	let mut opts = config.to_mqtt_options(client_id);
-	opts.set_last_will(LastWill::new(
-		format!("{topic_prefix}/status"),
-		"offline",
-		QoS::AtLeastOnce,
-		true,
-	));
+	opts.set_last_will(bridge_last_will(topic_prefix));
 	let (client, event_loop) = AsyncClient::new(opts, 256);
 	Ok((
 		SharedMqttClient {
@@ -271,17 +283,28 @@ mod tests {
 	}
 
 	#[test]
+	fn bridge_last_will_targets_bridge_status_topic() {
+		// Pin the production LWT contract: topic == the bridge
+		// availability topic every HA entity references, payload ==
+		// BRIDGE_NOT_AVAILABLE, retained. `connect()` installs exactly
+		// this will, so a rename of either side breaks this test.
+		let lw = bridge_last_will("bairelay");
+		assert_eq!(lw.topic, topics::bridge_status("bairelay"));
+		assert_eq!(lw.topic, "bairelay/status");
+		assert_eq!(&lw.message[..], crate::status::BRIDGE_NOT_AVAILABLE.as_bytes());
+		assert_eq!(&lw.message[..], b"offline");
+		assert!(lw.retain);
+		assert_eq!(lw.qos, QoS::AtLeastOnce);
+	}
+
+	#[test]
 	fn last_will_topic_uses_configured_prefix() {
-		// Exercise the LWT topic interpolation in isolation — building
-		// options the same way `connect` does. Guards the 		// prefix-rename against silent drift (HA discovery availability
-		// keys off exactly this topic).
+		// Round-trip the will `connect()` installs through `set_last_will`
+		// / `last_will()`, built via the same `bridge_last_will` helper
+		// the production path uses. Guards the prefix-rename against
+		// silent drift (HA discovery availability keys off this topic).
 		let mut opts = loopback_config().to_mqtt_options("bairelay-test");
-		opts.set_last_will(LastWill::new(
-			format!("{}/status", "bairelay"),
-			"offline",
-			QoS::AtLeastOnce,
-			true,
-		));
+		opts.set_last_will(bridge_last_will("bairelay"));
 		let lw = opts.last_will().expect("LWT must be set");
 		assert_eq!(lw.topic, "bairelay/status");
 		assert_eq!(&lw.message[..], b"offline");
@@ -291,12 +314,7 @@ mod tests {
 	#[test]
 	fn last_will_topic_honours_legacy_neolink_prefix() {
 		let mut opts = loopback_config().to_mqtt_options("bairelay-test");
-		opts.set_last_will(LastWill::new(
-			format!("{}/status", "neolink"),
-			"offline",
-			QoS::AtLeastOnce,
-			true,
-		));
+		opts.set_last_will(bridge_last_will("neolink"));
 		let lw = opts.last_will().expect("LWT must be set");
 		assert_eq!(lw.topic, "neolink/status");
 	}

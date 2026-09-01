@@ -140,9 +140,17 @@ Control dispatch is spawned as a separate `tokio::spawn` task from the event loo
 
 The error rumqttc emits when the cap is hit reads `broker's maximum packet size of '10240'` — misleading; the cap is client-side. Audit this on every rumqttc bump.
 
-### Last Will limitations
+### Availability is bridge-wide, driven by the Last Will
 
-MQTT supports only one Last Will per connection. The bridge sets a global LWT on `{topic_prefix}/status` with payload `"offline"`. Per-camera status is published as `"disconnected"` during graceful shutdown. On crash, only the global LWT fires — per-camera topics retain stale `"connected"` until the next restart.
+MQTT supports only one Last Will per connection, and the bridge holds a single shared connection for the whole fleet — so bridge-liveness is inherently a global signal, not a per-camera one. Every HA entity's `availability` block therefore points at the single topic `{topic_prefix}/status` (`topics::bridge_status`), with `payload_available = "online"` and `payload_not_available = "offline"` (the `BRIDGE_AVAILABLE` / `BRIDGE_NOT_AVAILABLE` constants shared by the discovery config, the runtime publish, and the LWT so they can't drift):
+
+- The bridge registers the LWT on `{topic_prefix}/status` with `"offline"` (retained), so an ungraceful crash marks the whole fleet unavailable.
+- On every broker `ConnAck` the bridge publishes `"online"` (retained) to the same topic (`mqtt_loop::handle_connack`). This re-arms availability after a broker restart wipes retained state — without waking any camera — and clears a stale LWT `"offline"` from a prior crash.
+- On graceful shutdown the fanout publishes `"offline"` explicitly, matching the LWT.
+
+Entity availability is deliberately **decoupled** from the transient per-camera media session. A battery camera's `idle_disconnect` cycle (teardown after ~45 s idle), a sleeping cam, or a Home Assistant restart must not flip any entity to `unavailable` — only the bridge process stopping does. The per-camera `{prefix}/{cam}/status` topic is no longer an availability source; `StatusPublisher::publish_connection` is retained as library API but no runtime path drives entity availability from it.
+
+A genuine "this camera has been unreachable for a long time" signal, if ever wanted, belongs in a separate diagnostic `binary_sensor` — it must not gate the device's availability.
 
 ### Topic prefix
 
@@ -150,9 +158,9 @@ MQTT supports only one Last Will per connection. The bridge sets a global LWT on
 
 ### Shutdown ordering
 
-The MQTT event loop is the **last subsystem to shut down**. The Ctrl+C handler cancels the global token (cameras, RTSP, watchdog, startup-wake); each per-camera teardown publishes its final `connection_state = false`; only after `orchestrator.run().await` returns does `main()` cancel a separate `mqtt_cancel: CancellationToken` and await the event-loop task with a 2 s timeout against a wedged broker.
+The MQTT event loop is the **last subsystem to shut down**. Before cancelling the global token (cameras, RTSP, watchdog, startup-wake), the Ctrl+C handler runs the shutdown fanout on the still-live MQTT client — publish bridge `"offline"` on `{prefix}/status`, then unpublish HA discovery — under a 2 s hard timeout. Only after `orchestrator.run().await` returns does `main()` cancel a separate `mqtt_cancel: CancellationToken` and await the event-loop task with a 2 s timeout against a wedged broker.
 
-Without the separate token, per-camera teardown races the event-loop exit and hits `Failed to send mqtt requests to eventloop`.
+Without the separate token, the fanout (and any late per-camera publish) races the event-loop exit and hits `Failed to send mqtt requests to eventloop`.
 
 ---
 

@@ -21,7 +21,7 @@ use bairelay::mqtt_loop::{
 	resolve_topic_prefix, EventAction, MqttBackoff, SHUTDOWN_FANOUT_TIMEOUT,
 };
 use bairelay::orchestrator::Orchestrator;
-use bairelay::run_support::{camera_names, load_validated_config};
+use bairelay::run_support::load_validated_config;
 use bairelay::watchdog::Watchdog;
 use bairelay_mqtt::{parse_control_message, MqttEventLoop, SharedMqttClient};
 
@@ -188,11 +188,9 @@ async fn async_main() -> Result<()> {
 		_ => None,
 	};
 
-	// Create orchestrator. After this point the per-camera name list
-	// lives on the orchestrator; the shutdown handler captures a
-	// clone of the cameras map so it can unpublish HA discovery
-	// payloads on Ctrl+C.
-	let camera_names_list: Vec<String> = camera_names(&config);
+	// Create orchestrator. The shutdown handler captures a clone of the
+	// cameras map so it can publish the bridge-offline availability
+	// marker and unpublish HA discovery payloads on Ctrl+C.
 	let orchestrator = Orchestrator::with_bcmedia_dump_and_discovery(
 		config,
 		token.clone(),
@@ -202,21 +200,22 @@ async fn async_main() -> Result<()> {
 	);
 	info!("Managing {} camera(s)", orchestrator.camera_count());
 
-	// Register Ctrl+C handler. Publishes "disconnected" for all cameras,
-	// unpublishes HA discovery config (retained-empty), flushes, then
-	// cancels the global token. MQTT is cancelled separately by main()
-	// AFTER orchestrator.run() returns, so per-camera teardown paths
-	// can still publish their own final state without racing a dead
-	// event loop.
+	// Register Ctrl+C handler. Publishes the bridge-offline availability
+	// marker, unpublishes HA discovery config (retained-empty), flushes,
+	// then cancels the global token. MQTT is cancelled separately by
+	// main() AFTER orchestrator.run() returns, so the fanout can flush
+	// without racing a dead event loop.
 	//
 	// Shutdown order on Ctrl+C:
-	// 1. Publish "disconnected" availability per camera (HA sees the outage).
+	// 1. Publish bridge "offline" on `{prefix}/status` (the availability
+	//    topic every entity references) so HA marks the fleet unavailable,
+	//    matching what the Last-Will would publish on a crash.
 	// 2. Unpublish HA discovery config topics (retained empty → HA deletes entities).
 	// 3. 200 ms flush pause so the event loop drains the retained writes.
 	// 4. Global cancellation token fires:
 	//    - RTSP server stops accepting new connections; existing connections see select! cancel and close.
 	//    - Session send loops observe cancel, call transport.close(), drop SubscriptionHandle (releases wake lock).
-	//    - Orchestrator's per-camera tasks observe cancel on their child tokens and tear down, publishing their own "disconnected" status along the way (MQTT is still alive).
+	//    - Orchestrator's per-camera tasks observe cancel on their child tokens and tear down (MQTT is still alive).
 	// 5. After orchestrator.run() returns, main() cancels mqtt_cancel
 	//    and awaits the event-loop task with a 2 s guard. That's when
 	//    MQTT actually stops.
@@ -231,7 +230,7 @@ async fn async_main() -> Result<()> {
 			}
 			info!("Received Ctrl+C, shutting down...");
 
-			// 1. Publish "disconnected" while MQTT is still running.
+			// 1. Publish bridge "offline" while MQTT is still running.
 			// 2. Unpublish HA discovery so HA clears the Bairelay
 			//    device cards. Safe on cameras without a publisher
 			//    attached (no-op) and on cameras whose caps are
@@ -248,12 +247,7 @@ async fn async_main() -> Result<()> {
 			if let Some(ref mqtt) = shutdown_mqtt {
 				let result = tokio::time::timeout(
 					SHUTDOWN_FANOUT_TIMEOUT,
-					publish_shutdown_fanout(
-						&camera_names_list,
-						&shutdown_cameras,
-						mqtt,
-						&shutdown_prefix,
-					),
+					publish_shutdown_fanout(&shutdown_cameras, mqtt, &shutdown_prefix),
 				)
 				.await;
 				if result.is_err() {
