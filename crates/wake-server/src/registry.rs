@@ -130,6 +130,9 @@ pub struct CameraEntry {
 	pub token: u64,
 	/// Wall-clock-free timestamp used for stale-on-lookup eviction.
 	pub last_seen: Instant,
+	/// When this UID first appeared (or reappeared after eviction).
+	/// Refreshes leave it alone, so it reads as "connected since".
+	pub first_seen: Instant,
 }
 
 /// Concurrent UID → `CameraEntry` table. Cheap to share across tasks; all
@@ -158,12 +161,14 @@ impl CameraRegistry {
 		if map.len() >= MAX_MAP_ENTRIES && !map.contains_key(uid) {
 			return None;
 		}
+		let first_seen = map.get(uid).map_or(now, |e| e.first_seen);
 		let prev = map.insert(
 			uid.to_string(),
 			CameraEntry {
 				addr,
 				token,
 				last_seen: now,
+				first_seen,
 			},
 		);
 		Some(prev.is_none())
@@ -352,6 +357,20 @@ mod tests {
 		assert!(reg
 			.lookup_by_ip("10.0.0.1".parse().unwrap(), later, Duration::from_secs(60))
 			.is_none());
+	}
+
+	#[test]
+	fn upsert_sets_first_seen_on_insert_and_preserves_it_on_refresh() {
+		let reg = CameraRegistry::new();
+		let t = now();
+		reg.upsert("UID1", addr("10.0.0.1:1"), 1, t);
+		let later = t + Duration::from_secs(30);
+		reg.upsert("UID1", addr("10.0.0.1:1"), 1, later);
+		let e = reg
+			.lookup_fresh("UID1", later, Duration::from_secs(60))
+			.unwrap();
+		assert_eq!(e.first_seen, t, "refresh must not move first_seen");
+		assert_eq!(e.last_seen, later);
 	}
 
 	#[test]

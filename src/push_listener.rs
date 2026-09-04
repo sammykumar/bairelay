@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use bairelay_mqtt::{SharedMqttClient, StatusPublisher};
+use bairelay_mqtt::SharedMqttClient;
 use bairelay_wake_server::registry::CameraRegistry;
 
 use crate::camera::CameraHandle;
@@ -161,21 +161,13 @@ fn handle_push(
 		"Motion push from camera (treating TCP-accept as motion edge)"
 	);
 
-	let handle = Arc::clone(handle);
-	let Some(mqtt_client) = mqtt.cloned() else {
-		// MQTT disabled in config — wake-lock alone still drives the
-		// connect loop, so observability suffers but the wake-on-motion
-		// behaviour is intact.
-		spawn_wake_only(handle, cfg.motion_wake_hold, cancel.clone());
-		return;
-	};
-
-	let prefix = topic_prefix.to_string();
-	let hold = cfg.motion_wake_hold;
-	let cancel = cancel.clone();
-	tokio::spawn(async move {
-		fire_motion(handle, mqtt_client, prefix, hold, cancel).await;
-	});
+	crate::motion::fire(
+		Arc::clone(handle),
+		mqtt.cloned(),
+		topic_prefix,
+		cfg.motion_wake_hold,
+		cancel.clone(),
+	);
 }
 
 /// Resolve a `(name → CameraHandle)` map entry from a registry-side UID.
@@ -205,59 +197,6 @@ pub(crate) fn match_camera_by_uid<'a>(
 				.is_some_and(|cfg_uid| registry_uid.starts_with(cfg_uid))
 		})
 		.max_by_key(|h| h.config().uid.as_deref().map_or(0, str::len))
-}
-
-/// Fire the motion event: publish `status/motion=on`, hold a wake-lock
-/// for `hold`, then publish a fallback `status/motion=off` so HA never
-/// gets stuck on `on` if the in-session `motion_listener` never picks
-/// up the live `Stop`. Idempotent w.r.t. the in-session publisher —
-/// duplicate `motion=off` is harmless (HA dedups).
-async fn fire_motion(
-	handle: Arc<CameraHandle>,
-	mqtt: SharedMqttClient,
-	topic_prefix: String,
-	hold: Duration,
-	cancel: CancellationToken,
-) {
-	let _guard = handle.wake_lock().acquire();
-	let publisher = StatusPublisher::new(&mqtt, &topic_prefix, handle.name());
-	if let Err(e) = publisher.publish_motion(true).await {
-		tracing::warn!(camera = %handle.name(), error = %e, "push motion: publish_motion(true) failed");
-	}
-	handle.status_cache().set_motion(true);
-
-	// Hold for `hold`, bailing on cancel — same primitive used by the
-	// camera reconnect path so the contract lives in one place.
-	crate::run_support::sleep_or_cancel(hold, &cancel).await;
-
-	// Cap the fallback publish so a wedged broker (Ctrl+C race against
-	// detached fire_motion tasks) can't hold the runtime open during
-	// shutdown. 1 s is generous for an alive broker; on shutdown, a
-	// dead broker hits the timeout and we move on quietly.
-	const FALLBACK_PUBLISH_TIMEOUT: Duration = Duration::from_secs(1);
-	match tokio::time::timeout(FALLBACK_PUBLISH_TIMEOUT, publisher.publish_motion(false)).await {
-		Ok(Ok(())) => {
-			handle.status_cache().set_motion(false);
-		}
-		Ok(Err(e)) => {
-			tracing::warn!(camera = %handle.name(), error = %e, "push motion: fallback publish_motion(false) failed");
-		}
-		Err(_) => {
-			tracing::debug!(
-				camera = %handle.name(),
-				"push motion: fallback publish_motion(false) timed out (likely shutdown)"
-			);
-		}
-	}
-}
-
-/// Wake-lock-only path used when no MQTT client is configured. Holds
-/// the lock for the same window so the connect loop has time to land.
-fn spawn_wake_only(handle: Arc<CameraHandle>, hold: Duration, cancel: CancellationToken) {
-	tokio::spawn(async move {
-		let _guard = handle.wake_lock().acquire();
-		crate::run_support::sleep_or_cancel(hold, &cancel).await;
-	});
 }
 
 #[cfg(test)]

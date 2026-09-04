@@ -50,9 +50,12 @@ bind = "0.0.0.0"
 # [wake_server]
 # enable = false             # opt-in
 # middleman_port = 9999      # UDP, C2M_Q listener
-# register_port = 58200      # UDP, D2R_HB / C2R_C / D2R_DISC listener
+# register_port = 58200      # UDP, D2R_HB / C2R_C / D2R_DISC / alarm listener
 # heartbeat_ms = 20000       # echoed to cameras in R2D_HB_R
 # stale_after_ms = 80000     # registry entries older than this read as None
+# alarm_suppress_after_connect_secs = 60  # ignore motion alarms this soon
+#                            # after the camera registers or the server starts;
+#                            # cameras send an identical burst while waking
 
 
 # Motion-push listener.

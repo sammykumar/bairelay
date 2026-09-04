@@ -39,6 +39,7 @@ async fn middleman_replies_to_c2m_q_with_register_addr() {
 		register_port: register_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
@@ -46,6 +47,7 @@ async fn middleman_replies_to_c2m_q_with_register_addr() {
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -96,12 +98,14 @@ async fn heartbeat_records_and_replies() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -145,12 +149,14 @@ async fn heartbeat_without_needrsp_records_silently() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -189,12 +195,14 @@ async fn c2r_c_for_known_uid_emits_burst_and_replies() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -307,12 +315,14 @@ async fn c2r_c_for_unknown_uid_replies_with_rsp_neg1() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -368,12 +378,14 @@ async fn d2r_disc_is_acked_with_matching_sid() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -406,12 +418,14 @@ async fn stale_uid_reads_as_unknown() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 1000,
 		stale_after_ms: 2000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -510,12 +524,14 @@ async fn loopback_self_call_succeeds() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -559,12 +575,14 @@ async fn bad_packets_do_not_crash_listener() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -614,11 +632,13 @@ async fn run_binds_configured_ports_and_cancels_cleanly() {
 		register_port: reg_port,
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let cancel = CancellationToken::new();
 	let handle = tokio::spawn(bairelay_wake_server::run(
 		cfg,
 		bairelay_wake_server::make_registry(),
+		None,
 		cancel.clone(),
 	));
 
@@ -650,9 +670,11 @@ async fn run_returns_bind_error_on_register_port_collision() {
 		register_port: reg_port,
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let cancel = CancellationToken::new();
-	let res = bairelay_wake_server::run(cfg, bairelay_wake_server::make_registry(), cancel).await;
+	let res =
+		bairelay_wake_server::run(cfg, bairelay_wake_server::make_registry(), None, cancel).await;
 	match res {
 		Err(bairelay_wake_server::WakeServerError::Bind { addr, .. }) => {
 			assert_eq!(addr.port(), reg_port);
@@ -677,12 +699,14 @@ async fn cancel_during_wake_burst_aborts_remaining_packets() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -754,9 +778,11 @@ async fn run_returns_bind_error_on_port_collision() {
 		register_port: reg_port,
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let cancel = CancellationToken::new();
-	let res = bairelay_wake_server::run(cfg, bairelay_wake_server::make_registry(), cancel).await;
+	let res =
+		bairelay_wake_server::run(cfg, bairelay_wake_server::make_registry(), None, cancel).await;
 	match res {
 		Err(bairelay_wake_server::WakeServerError::Bind { addr, .. }) => {
 			assert_eq!(addr.port(), occupied_port);
@@ -779,12 +805,14 @@ async fn register_logs_d2r_c_r_without_replying() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -821,12 +849,14 @@ async fn register_logs_c2r_cfm_without_replying() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -865,12 +895,14 @@ async fn register_drops_unhandled_xml_variant() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -899,12 +931,14 @@ async fn middleman_drops_non_c2m_q_xml() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -939,12 +973,14 @@ async fn c2r_c_for_unknown_uid_does_not_leak_other_uids_address() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -1033,12 +1069,14 @@ async fn bad_crc_packet_does_not_crash_listener() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -1098,12 +1136,14 @@ async fn oversized_uid_in_d2m_q_is_rejected() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -1165,12 +1205,14 @@ async fn d2r_r_with_no_anchor_is_dropped() {
 		register_port: reg_addr.port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 
@@ -1208,12 +1250,14 @@ async fn cancel_returns_promptly() {
 		register_port: register.local_addr().unwrap().port(),
 		heartbeat_ms: 20000,
 		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 60,
 	};
 	let handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
 		cfg,
 		bairelay_wake_server::make_registry(),
 		middleman,
 		register,
+		None,
 		cancel.clone(),
 	));
 	cancel.cancel();
@@ -1221,4 +1265,177 @@ async fn cancel_returns_promptly() {
 	let join = res.expect("did not exit within 500 ms");
 	let inner = join.expect("task panicked");
 	inner.expect("inner Result should be Ok");
+}
+
+/// Records the alarms the register loop dispatches, so tests can assert
+/// on the suppression window without a live camera.
+#[derive(Default)]
+struct RecordingSink {
+	seen: std::sync::Mutex<Vec<(String, u32)>>,
+}
+
+impl RecordingSink {
+	fn seen(&self) -> Vec<(String, u32)> {
+		self.seen.lock().unwrap().clone()
+	}
+}
+
+impl bairelay_wake_server::AlarmSink for RecordingSink {
+	fn on_alarm(&self, uid: &str, counter: u32) {
+		self.seen.lock().unwrap().push((uid.to_string(), counter));
+	}
+}
+
+/// One packet of a real Backyard 2 motion burst, with the uid field
+/// rewritten so the fixture works against a test-registered camera.
+fn alarm_packet(uid: &str, counter: u32) -> Vec<u8> {
+	const MAGIC_HEADER_UDP_ALARM: u32 = 0x2a87cf31;
+	let payload: [u8; 11] = [
+		0x2B, 0x1E, 0x48, 0x69, 0xF7, 0x11, 0x18, 0x78, 0x6A, 0x1D, 0x6A,
+	];
+	let mut uid_field = [0u8; 32];
+	uid_field[..uid.len()].copy_from_slice(uid.as_bytes());
+	let mut wire = Vec::new();
+	wire.extend_from_slice(&MAGIC_HEADER_UDP_ALARM.to_le_bytes());
+	wire.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+	wire.extend_from_slice(&counter.to_le_bytes());
+	wire.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+	wire.extend_from_slice(&0u32.to_le_bytes());
+	wire.extend_from_slice(&uid_field);
+	wire.extend_from_slice(&0xB637_88B2u32.to_le_bytes());
+	wire.extend_from_slice(&payload);
+	wire
+}
+
+/// Stand up the register loop with a recording sink and a caller-chosen
+/// suppression window, register `uid` by heartbeat, then send one alarm
+/// burst packet and give the loop a moment to dispatch it.
+async fn run_alarm_case(
+	uid_registered: &str,
+	uid_in_alarm: &str,
+	suppress_secs: u64,
+) -> Vec<(String, u32)> {
+	let cancel = CancellationToken::new();
+	let middleman = UdpSocket::bind((LOOPBACK, 0)).await.unwrap();
+	let register = UdpSocket::bind((LOOPBACK, 0)).await.unwrap();
+	let mid_addr = middleman.local_addr().unwrap();
+	let reg_addr = register.local_addr().unwrap();
+	let cfg = RuntimeConfig {
+		bind: LOOPBACK,
+		middleman_port: mid_addr.port(),
+		register_port: reg_addr.port(),
+		heartbeat_ms: 20000,
+		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: suppress_secs,
+	};
+	let sink = std::sync::Arc::new(RecordingSink::default());
+	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
+		cfg,
+		bairelay_wake_server::make_registry(),
+		middleman,
+		register,
+		Some(sink.clone()),
+		cancel.clone(),
+	));
+
+	let cam = UdpSocket::bind((LOOPBACK, 0)).await.unwrap();
+	let hb = encode_discovery(
+		0x1,
+		UdpXml::D2rHb(D2rHb {
+			uid: uid_registered.into(),
+			dev: None,
+			needrsp: Some(1),
+			token: 7,
+		}),
+	)
+	.unwrap();
+	cam.send_to(&hb, reg_addr).await.unwrap();
+	let _ = recv_one(&cam).await; // R2D_HB_R
+
+	cam.send_to(&alarm_packet(uid_in_alarm, 5), reg_addr)
+		.await
+		.unwrap();
+	tokio::time::sleep(Duration::from_millis(50)).await;
+
+	cancel.cancel();
+	let _ = server_handle.await;
+	sink.seen()
+}
+
+#[tokio::test]
+async fn alarm_packet_dispatches_to_sink_once_past_suppression_window() {
+	// Camera heartbeats the long-form uid; the alarm header carries the
+	// short sticker form, so this also exercises the prefix fallback.
+	let seen = run_alarm_case("9527000960V21RLKABCD", "9527000960V21RLK", 0).await;
+	assert_eq!(seen, vec![("9527000960V21RLK".to_string(), 5)]);
+}
+
+#[tokio::test]
+async fn alarm_packet_inside_suppression_window_is_dropped() {
+	// The camera registered moments ago — this is exactly the startup
+	// wake cycle that must not read as motion.
+	let seen = run_alarm_case("9527000960V21RLKABCD", "9527000960V21RLK", 60).await;
+	assert!(
+		seen.is_empty(),
+		"alarm inside the startup window must not reach the sink, got {seen:?}"
+	);
+}
+
+#[tokio::test]
+async fn alarm_packet_for_unregistered_uid_is_dropped() {
+	let seen = run_alarm_case("9527000960WLCGYZ", "9527000960V21RLK", 0).await;
+	assert!(
+		seen.is_empty(),
+		"alarm for an unregistered uid must not reach the sink, got {seen:?}"
+	);
+}
+
+#[tokio::test]
+async fn malformed_alarm_packet_does_not_kill_the_register_loop() {
+	// Alarm magic followed by garbage: the loop must drop it and keep
+	// serving the handshake traffic that follows.
+	let cancel = CancellationToken::new();
+	let middleman = UdpSocket::bind((LOOPBACK, 0)).await.unwrap();
+	let register = UdpSocket::bind((LOOPBACK, 0)).await.unwrap();
+	let mid_addr = middleman.local_addr().unwrap();
+	let reg_addr = register.local_addr().unwrap();
+	let cfg = RuntimeConfig {
+		bind: LOOPBACK,
+		middleman_port: mid_addr.port(),
+		register_port: reg_addr.port(),
+		heartbeat_ms: 20000,
+		stale_after_ms: 80000,
+		alarm_suppress_after_connect_secs: 0,
+	};
+	let server_handle = tokio::spawn(bairelay_wake_server::run_with_sockets(
+		cfg,
+		bairelay_wake_server::make_registry(),
+		middleman,
+		register,
+		None,
+		cancel.clone(),
+	));
+
+	let cam = UdpSocket::bind((LOOPBACK, 0)).await.unwrap();
+	let mut junk = 0x2a87cf31u32.to_le_bytes().to_vec();
+	junk.extend_from_slice(&[0xff; 9]);
+	cam.send_to(&junk, reg_addr).await.unwrap();
+
+	let hb = encode_discovery(
+		0x1,
+		UdpXml::D2rHb(D2rHb {
+			uid: "CAMLIVE".into(),
+			dev: None,
+			needrsp: Some(1),
+			token: 7,
+		}),
+	)
+	.unwrap();
+	cam.send_to(&hb, reg_addr).await.unwrap();
+	let (reply, _) = recv_one(&cam).await;
+	let (_, payload) = decode_discovery(&reply).unwrap();
+	assert!(matches!(payload, UdpXml::R2dHbr(_)));
+
+	cancel.cancel();
+	let _ = server_handle.await;
 }

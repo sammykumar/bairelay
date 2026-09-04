@@ -10,6 +10,7 @@ pub mod cli_convert;
 pub mod config;
 pub mod grace_period;
 pub mod local_time;
+pub mod motion;
 pub mod mqtt_dispatch;
 pub mod mqtt_loop;
 pub mod oneshot;

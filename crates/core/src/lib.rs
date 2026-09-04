@@ -447,7 +447,7 @@ pub mod pcap_decode_api {
 						}
 					}
 				}
-				BcUdp::Discovery(_) | BcUdp::Ack(_) => {
+				BcUdp::Discovery(_) | BcUdp::Ack(_) | BcUdp::Alarm(_) => {
 					// These don't carry Bc messages; ignore for the
 					// reassembled-stream view. (Discovery payloads are
 					// XOR-encrypted XML and worth rendering separately

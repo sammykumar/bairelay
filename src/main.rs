@@ -452,12 +452,22 @@ async fn async_main() -> Result<()> {
 			let middleman_port = runtime.middleman_port;
 			let register_port = runtime.register_port;
 			let registry_for_server = registry.clone();
+			// Motion alarms decoded off the register port dispatch into
+			// the same pipeline the push listener uses.
+			let alarm_sink: Arc<dyn bairelay_wake_server::AlarmSink> =
+				Arc::new(bairelay::motion::AlarmMotionSink::new(
+					orchestrator.cameras_arc(),
+					orchestrator.mqtt_client().cloned(),
+					orchestrator.topic_prefix().to_string(),
+					token.clone(),
+				));
 			sup.spawn("wake_server", move |cancel| async move {
 				if let Err(e) = bairelay_wake_server::run_with_sockets(
 					runtime,
 					registry_for_server,
 					middleman_sock,
 					register_sock,
+					Some(alarm_sink),
 					cancel,
 				)
 				.await

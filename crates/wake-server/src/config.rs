@@ -23,6 +23,13 @@ pub struct WakeServerConfig {
 	#[serde(default = "default_stale_after_ms")]
 	pub stale_after_ms: u64,
 
+	/// Motion alarms are ignored for this long after the camera
+	/// registers, and after the wake server itself starts. Cameras emit
+	/// an identical alarm burst during their own startup wake cycle, so
+	/// without the window every restart produces a false motion edge.
+	#[serde(default = "default_alarm_suppress_after_connect_secs")]
+	pub alarm_suppress_after_connect_secs: u64,
+
 	/// Bind IP, populated from the top-level `bind_addr` when the binary
 	/// constructs a `RuntimeConfig` (see [`RuntimeConfig::from_block`]).
 	/// Skipped at TOML parse time so operators never set it directly.
@@ -38,6 +45,7 @@ impl Default for WakeServerConfig {
 			register_port: default_register_port(),
 			heartbeat_ms: default_heartbeat_ms(),
 			stale_after_ms: default_stale_after_ms(),
+			alarm_suppress_after_connect_secs: default_alarm_suppress_after_connect_secs(),
 			bind: None,
 		}
 	}
@@ -55,6 +63,9 @@ fn default_heartbeat_ms() -> u32 {
 fn default_stale_after_ms() -> u64 {
 	80000
 }
+fn default_alarm_suppress_after_connect_secs() -> u64 {
+	60
+}
 
 /// Validated runtime view consumed by `run()`. Constructed by the binary
 /// from a `WakeServerConfig` plus the top-level `bind_addr`.
@@ -65,6 +76,7 @@ pub struct RuntimeConfig {
 	pub register_port: u16,
 	pub heartbeat_ms: u32,
 	pub stale_after_ms: u64,
+	pub alarm_suppress_after_connect_secs: u64,
 }
 
 impl RuntimeConfig {
@@ -102,6 +114,7 @@ impl RuntimeConfig {
 			register_port: block.register_port,
 			heartbeat_ms: block.heartbeat_ms,
 			stale_after_ms: block.stale_after_ms,
+			alarm_suppress_after_connect_secs: block.alarm_suppress_after_connect_secs,
 		})
 	}
 }
@@ -123,6 +136,16 @@ mod tests {
 		assert_eq!(cfg.register_port, 58200);
 		assert_eq!(cfg.heartbeat_ms, 20000);
 		assert_eq!(cfg.stale_after_ms, 80000);
+		assert_eq!(cfg.alarm_suppress_after_connect_secs, 60);
+	}
+
+	#[test]
+	fn alarm_suppress_window_is_operator_overridable() {
+		let cfg: WakeServerConfig =
+			toml::from_str("alarm_suppress_after_connect_secs = 5").unwrap();
+		assert_eq!(cfg.alarm_suppress_after_connect_secs, 5);
+		let rt = RuntimeConfig::from_block(&cfg, loopback()).unwrap();
+		assert_eq!(rt.alarm_suppress_after_connect_secs, 5);
 	}
 
 	#[test]

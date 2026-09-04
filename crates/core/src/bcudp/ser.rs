@@ -48,6 +48,13 @@ impl BcUdp {
 				let bin_len = len_as_u32(binary_payload.len())?;
 				gen(bcudp_data(payload, binary_payload, bin_len), buf)?
 			}
+			BcUdp::Alarm(_) => {
+				// Receive-only. The parser discards the encrypted
+				// payload, so a byte-faithful round trip is impossible
+				// and nothing in the codebase originates one.
+				error!("BcUdp Alarm packets are receive-only; refusing to serialize");
+				return Err(Error::from(cookie_factory::GenError::CustomError(6)));
+			}
 		};
 
 		Ok(buf)
