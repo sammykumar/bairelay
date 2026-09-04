@@ -38,6 +38,7 @@ pub fn decode_discovery(buf: &[u8]) -> Result<(u32, UdpXml), WakeServerError> {
 		}
 		BcUdp::Ack(_) => Err(WakeServerError::UnexpectedPacketKind { kind: "Ack" }),
 		BcUdp::Data(_) => Err(WakeServerError::UnexpectedPacketKind { kind: "Data" }),
+		BcUdp::Alarm(_) => Err(WakeServerError::UnexpectedPacketKind { kind: "Alarm" }),
 	}
 }
 

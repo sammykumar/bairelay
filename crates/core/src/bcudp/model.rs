@@ -13,6 +13,8 @@ pub enum BcUdp {
 	Ack(UdpAck),
 	/// Packet containing the data (or part of the data) of a Bc packet
 	Data(UdpData),
+	/// Motion alarm burst a battery camera sends to the register port
+	Alarm(UdpAlarm),
 }
 
 impl BcUdp {
@@ -22,6 +24,7 @@ impl BcUdp {
 			Self::Discovery(_) => 0,
 			Self::Ack(data) => data.connection_id,
 			Self::Data(data) => data.connection_id,
+			Self::Alarm(_) => 0,
 		}
 	}
 }
@@ -130,6 +133,28 @@ impl std::fmt::Debug for UdpData {
 			.entry(&"payload_len", &self.payload.len())
 			.finish()
 	}
+}
+
+/// Magic for the UDP Alarm packet
+pub const MAGIC_HEADER_UDP_ALARM: u32 = 0x2a87cf31;
+
+/// Sent as a burst of three to the register port when a battery camera
+/// detects motion. The payload is encrypted with a key we have not
+/// recovered, so only the header is interpreted — the arrival of the
+/// packet is itself the motion signal.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct UdpAlarm {
+	// The packet also contains these header fields not deserialized into this struct:
+	// 4 Bytes Magic
+	// 4 Bytes unknown always `ffffffff`
+	// 4 Bytes unknown always `00000000`
+	// 4 Bytes checksum
+	/// Monotonic per-camera counter, incremented once per packet
+	pub counter: u32,
+	/// The camera UID, sent as a 32-byte NUL-padded ASCII field
+	pub uid: String,
+	/// Length of the encrypted payload, which is consumed but not decoded
+	pub payload_len: u32,
 }
 
 #[cfg(test)]

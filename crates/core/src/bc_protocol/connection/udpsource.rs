@@ -759,6 +759,7 @@ impl UdpPayloadInner {
 								self.ack_tx.send_replace(self.flow.build_send_ack());
 							}
 						},
+						BcUdp::Alarm(_alarm) => {},
 					}
 				}
 				log::trace!("Got packet");

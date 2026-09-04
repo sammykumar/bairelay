@@ -17,6 +17,9 @@ use nom::{
 /// the wake server's public ports drives memory exhaustion.
 const MAX_BCUDP_PAYLOAD: u32 = 65_535;
 
+/// Width of the NUL-padded ASCII uid field in a [`UdpAlarm`] header.
+const UID_FIELD_LEN: u32 = 32;
+
 type IResult<I, O, E = nom::error::VerboseError<I>> = Result<(I, O), nom::Err<E>>;
 
 fn make_error<I, E>(input: I, ctx: &'static str, kind: ErrorKind) -> E
@@ -47,7 +50,10 @@ fn bcudp(buf: &[u8]) -> IResult<&[u8], BcUdp> {
 		verify(le_u32, |x| {
 			matches!(
 				*x,
-				MAGIC_HEADER_UDP_NEGO | MAGIC_HEADER_UDP_ACK | MAGIC_HEADER_UDP_DATA
+				MAGIC_HEADER_UDP_NEGO
+					| MAGIC_HEADER_UDP_ACK
+					| MAGIC_HEADER_UDP_DATA
+					| MAGIC_HEADER_UDP_ALARM
 			)
 		}),
 	)(buf)?;
@@ -64,6 +70,10 @@ fn bcudp(buf: &[u8]) -> IResult<&[u8], BcUdp> {
 		MAGIC_HEADER_UDP_DATA => {
 			let (buf, payload) = udp_data(buf)?;
 			Ok((buf, BcUdp::Data(payload)))
+		}
+		MAGIC_HEADER_UDP_ALARM => {
+			let (buf, payload) = udp_alarm(buf)?;
+			Ok((buf, BcUdp::Alarm(payload)))
 		}
 		_ => Err(Err::Failure(make_error(
 			buf,
@@ -184,6 +194,47 @@ fn udp_data(buf: &[u8]) -> IResult<&[u8], UdpData> {
 	Ok((buf, data))
 }
 
+fn udp_alarm(buf: &[u8]) -> IResult<&[u8], UdpAlarm> {
+	let (buf, payload_len) = error_context(
+		"ALARM: Missing payload_len or exceeds cap",
+		verify(le_u32, |&n| n <= MAX_BCUDP_PAYLOAD),
+	)(buf)?;
+	let (buf, counter) = error_context("ALARM: Missing counter", le_u32)(buf)?;
+	let (buf, _unknown_a) = error_context("ALARM: Missing UnknownA", le_u32)(buf)?;
+	let (buf, _unknown_b) = error_context("ALARM: Missing UnknownB", le_u32)(buf)?;
+	let (buf, uid_field) = error_context("ALARM: Missing uid", take(UID_FIELD_LEN))(buf)?;
+	let (buf, _checksum) = error_context("ALARM: Missing checksum", le_u32)(buf)?;
+	// Consume the payload so the framer stays aligned on the next packet.
+	// It is encrypted with a key we have not recovered; nothing reads it.
+	let (buf, _payload) = take(payload_len)(buf)?;
+
+	let uid_bytes = uid_field
+		.iter()
+		.position(|&b| b == 0)
+		.map_or(uid_field, |end| &uid_field[..end]);
+	let uid = match std::str::from_utf8(uid_bytes) {
+		Ok(uid) if !uid.is_empty() => uid.to_string(),
+		_ => {
+			// Public UDP port: a peer can put arbitrary bytes here. An
+			// unusable uid is dropped rather than lossily decoded into
+			// what becomes a registry lookup key.
+			log::debug!("BcUdp Alarm: uid field is empty or not UTF-8; dropping");
+			return Err(Err::Error(make_error(
+				buf,
+				"ALARM: Invalid uid",
+				ErrorKind::MapRes,
+			)));
+		}
+	};
+
+	let data = UdpAlarm {
+		counter,
+		uid,
+		payload_len,
+	};
+	Ok((buf, data))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::Error;
@@ -199,6 +250,136 @@ mod tests {
 		let _ = env_logger::Builder::from_env(Env::default().default_filter_or("info"))
 			.is_test(true)
 			.try_init();
+	}
+
+	// Real capture: Backyard 2 motion alarm burst, counter 5, 11-byte
+	// encrypted payload. 67 bytes on the wire.
+	const ALARM_BACKYARD2_C5: &[u8] = &[
+		0x31, 0xCF, 0x87, 0x2A, 0x0B, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF,
+		0xFF, 0x00, 0x00, 0x00, 0x00, 0x39, 0x35, 0x32, 0x37, 0x30, 0x30, 0x30, 0x39, 0x36, 0x30,
+		0x56, 0x32, 0x31, 0x52, 0x4C, 0x4B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xB2, 0x88, 0x37, 0xB6, 0x2B, 0x1E, 0x48, 0x69,
+		0xF7, 0x11, 0x18, 0x78, 0x6A, 0x1D, 0x6A,
+	];
+
+	// Same camera, next packet in the burst: counter 6, 61-byte payload.
+	const ALARM_BACKYARD2_C6: &[u8] = &[
+		0x31, 0xCF, 0x87, 0x2A, 0x3D, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF,
+		0xFF, 0x00, 0x00, 0x00, 0x00, 0x39, 0x35, 0x32, 0x37, 0x30, 0x30, 0x30, 0x39, 0x36, 0x30,
+		0x56, 0x32, 0x31, 0x52, 0x4C, 0x4B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x85, 0x6C, 0xA5, 0x06, 0x2A, 0x1E, 0x48, 0x69,
+		0xF6, 0x11, 0x18, 0x78, 0x6B, 0x1A, 0x3B, 0x1A, 0x04, 0x16, 0x03, 0xE3, 0x45, 0x73, 0x50,
+		0xE8, 0xFC, 0xCD, 0xF7, 0x95, 0x8C, 0xD4, 0x49, 0xAF, 0x89, 0xA7, 0x9D, 0x63, 0x30, 0x50,
+		0x49, 0x6A, 0xE1, 0x1E, 0x18, 0x33, 0x3E, 0x40, 0x35, 0x02, 0x58, 0x50, 0x40, 0xB1, 0x03,
+		0x36, 0x1D, 0xF4, 0xBB, 0x96, 0xB5, 0xCA, 0xD4, 0xC3, 0x4B, 0xB6, 0xD6,
+	];
+
+	/// Build an alarm packet with a caller-chosen uid field and payload
+	/// length, for the rejection cases below.
+	fn alarm_wire(payload_len: u32, uid_field: &[u8; 32], payload: &[u8]) -> Vec<u8> {
+		let mut wire = Vec::new();
+		wire.extend_from_slice(&MAGIC_HEADER_UDP_ALARM.to_le_bytes());
+		wire.extend_from_slice(&payload_len.to_le_bytes());
+		wire.extend_from_slice(&7u32.to_le_bytes()); // counter
+		wire.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+		wire.extend_from_slice(&0u32.to_le_bytes());
+		wire.extend_from_slice(uid_field);
+		wire.extend_from_slice(&0u32.to_le_bytes()); // checksum
+		wire.extend_from_slice(payload);
+		wire
+	}
+
+	fn uid_field(uid: &[u8]) -> [u8; 32] {
+		let mut f = [0u8; 32];
+		f[..uid.len()].copy_from_slice(uid);
+		f
+	}
+
+	#[test]
+	// Live capture from Backyard 2: the first packet of a motion burst.
+	fn test_alarm_backyard2_counter5() {
+		init();
+
+		let e = BcUdp::deserialize(&mut BytesMut::from(ALARM_BACKYARD2_C5));
+		assert_matches!(
+			e,
+			Ok(BcUdp::Alarm(UdpAlarm {
+				counter: 5,
+				uid,
+				payload_len: 11,
+			})) if uid == "9527000960V21RLK"
+		);
+	}
+
+	#[test]
+	// Second packet of the same burst — longer payload, same uid.
+	fn test_alarm_backyard2_counter6() {
+		init();
+
+		let e = BcUdp::deserialize(&mut BytesMut::from(ALARM_BACKYARD2_C6));
+		assert_matches!(
+			e,
+			Ok(BcUdp::Alarm(UdpAlarm {
+				counter: 6,
+				uid,
+				payload_len: 61,
+			})) if uid == "9527000960V21RLK"
+		);
+	}
+
+	#[test]
+	// A datagram cut short mid-header must report Incomplete / Err, never
+	// panic — the register loop hands us whatever lands on the port.
+	fn test_alarm_truncated_returns_err_no_panic() {
+		for cut in 1..ALARM_BACKYARD2_C5.len() {
+			let mut buf = BytesMut::from(&ALARM_BACKYARD2_C5[..cut]);
+			let result = BcUdp::deserialize(&mut buf);
+			assert!(
+				result.is_err(),
+				"truncation at {cut} bytes must not parse, got {result:?}"
+			);
+		}
+	}
+
+	#[test]
+	// Hostile peer claims a 4 GiB payload. The shared cap must reject it
+	// before `take` drives the framer's buffer growth.
+	fn alarm_payload_len_above_cap_rejected() {
+		let wire = alarm_wire(u32::MAX, &uid_field(b"9527000960V21RLK"), &[]);
+		let mut buf = BytesMut::from(wire.as_slice());
+		let result = BcUdp::deserialize(&mut buf);
+		assert!(
+			matches!(result, Err(Error::NomError(_))),
+			"payload_len above MAX_BCUDP_PAYLOAD must reject, got {result:?}"
+		);
+	}
+
+	#[test]
+	// The uid field is ASCII on the wire; invalid UTF-8 is rejected
+	// rather than lossily decoded into the registry lookup key.
+	fn alarm_non_utf8_uid_rejected() {
+		let mut field = uid_field(b"9527000960V21RLK");
+		field[3] = 0xFF;
+		let wire = alarm_wire(0, &field, &[]);
+		let mut buf = BytesMut::from(wire.as_slice());
+		let result = BcUdp::deserialize(&mut buf);
+		assert!(
+			matches!(result, Err(Error::NomError(_))),
+			"non-UTF8 uid must reject, got {result:?}"
+		);
+	}
+
+	#[test]
+	// An all-NUL uid field carries no camera identity; reject it so it
+	// can never be used as a registry lookup key.
+	fn alarm_empty_uid_rejected() {
+		let wire = alarm_wire(0, &[0u8; 32], &[]);
+		let mut buf = BytesMut::from(wire.as_slice());
+		let result = BcUdp::deserialize(&mut buf);
+		assert!(
+			matches!(result, Err(Error::NomError(_))),
+			"empty uid must reject, got {result:?}"
+		);
 	}
 
 	#[test]
@@ -468,13 +649,14 @@ mod tests {
 
 		#[test]
 		fn bcudp_deserialize_with_valid_magic_prefix_never_panics(
-			magic_idx in 0u8..3,
+			magic_idx in 0u8..4,
 			tail in proptest::collection::vec(any::<u8>(), 0..2048),
 		) {
-			const MAGICS: [u32; 3] = [
+			const MAGICS: [u32; 4] = [
 				MAGIC_HEADER_UDP_NEGO,
 				MAGIC_HEADER_UDP_ACK,
 				MAGIC_HEADER_UDP_DATA,
+				MAGIC_HEADER_UDP_ALARM,
 			];
 			let mut bytes = MAGICS[magic_idx as usize].to_le_bytes().to_vec();
 			bytes.extend_from_slice(&tail);

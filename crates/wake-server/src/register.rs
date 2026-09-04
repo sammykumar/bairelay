@@ -3,8 +3,10 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bytes::BytesMut;
+use neolink_core::bcudp::model::{BcUdp, UdpAlarm, MAGIC_HEADER_UDP_ALARM};
 use neolink_core::bcudp::xml::{
 	D2rHb, D2rR, HbTimer, IpPort, R2cCr, R2cT, R2dC, R2dDcr, R2dHbr, R2dRr, UdpXml,
 };
@@ -16,7 +18,7 @@ use tracing::{debug, info, warn};
 use crate::config::RuntimeConfig;
 use crate::packet::{decode_discovery, encode_discovery, random_sid};
 use crate::registry::{CameraRegistry, SessionAnchors};
-use crate::WakeServerError;
+use crate::{AlarmSink, WakeServerError};
 
 const WAKE_BURST_COUNT: usize = 10;
 const WAKE_BURST_INTERVAL: Duration = Duration::from_millis(100);
@@ -26,11 +28,16 @@ pub(crate) async fn run(
 	registry: Arc<CameraRegistry>,
 	anchors: Arc<SessionAnchors>,
 	cfg: RuntimeConfig,
+	alarm_sink: Option<Arc<dyn AlarmSink>>,
 	cancel: CancellationToken,
 ) -> Result<(), WakeServerError> {
 	let local = sock.local_addr().ok();
 	info!(?local, "wake-server register listening");
 	let stale = Duration::from_millis(cfg.stale_after_ms);
+	// Anchor for the alarm suppression window. Cameras fire an alarm
+	// burst during their own startup wake cycle, which lands here within
+	// seconds of us coming up.
+	let started_at = tokio::time::Instant::now().into_std();
 	let mut buf = vec![0u8; 4096];
 	loop {
 		tokio::select! {
@@ -43,7 +50,19 @@ pub(crate) async fn run(
 					Ok(p) => p,
 					Err(e) => { warn!(error = %e, "register recv_from"); continue; }
 				};
-				handle(&sock, &registry, &anchors, &cfg, stale, src, &buf[..n], &cancel).await;
+				handle(
+					&sock,
+					&registry,
+					&anchors,
+					&cfg,
+					stale,
+					started_at,
+					alarm_sink.as_ref(),
+					src,
+					&buf[..n],
+					&cancel,
+				)
+				.await;
 			}
 		}
 	}
@@ -56,10 +75,35 @@ async fn handle(
 	anchors: &Arc<SessionAnchors>,
 	cfg: &RuntimeConfig,
 	stale_after: Duration,
+	started_at: Instant,
+	alarm_sink: Option<&Arc<dyn AlarmSink>>,
 	src: SocketAddr,
 	raw: &[u8],
 	cancel: &CancellationToken,
 ) {
+	// Motion alarms share the register port with the handshake traffic
+	// but are not Discovery packets, so peek the magic before handing
+	// the datagram to `decode_discovery`.
+	if raw.len() >= 4
+		&& u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) == MAGIC_HEADER_UDP_ALARM
+	{
+		match BcUdp::deserialize(&mut BytesMut::from(raw)) {
+			Ok(BcUdp::Alarm(alarm)) => handle_alarm(
+				registry,
+				cfg,
+				stale_after,
+				started_at,
+				src,
+				alarm,
+				alarm_sink,
+			),
+			Ok(other) => {
+				debug!(%src, kind = other.get_connection_id(), "register: alarm magic decoded as another kind")
+			}
+			Err(e) => debug!(%src, error = %e, "register: bad alarm packet"),
+		}
+		return;
+	}
 	let (tid, payload) = match decode_discovery(raw) {
 		Ok(v) => v,
 		Err(e) => {
@@ -90,6 +134,52 @@ async fn handle(
 			debug!(%src, sid = cfm.sid, conn = %cfm.conn, "C2R_CFM");
 		}
 		other => debug!(%src, ?other, "register: unhandled payload"),
+	}
+}
+
+/// Turn a decoded motion alarm into a downstream motion edge.
+///
+/// Suppressed inside `alarm_suppress_after_connect_secs` of either the
+/// camera registering or the wake server starting: cameras emit an
+/// identical burst during their own startup wake cycle, and firing on
+/// those gives a false motion event on every restart.
+fn handle_alarm(
+	registry: &CameraRegistry,
+	cfg: &RuntimeConfig,
+	stale_after: Duration,
+	started_at: Instant,
+	src: SocketAddr,
+	alarm: UdpAlarm,
+	alarm_sink: Option<&Arc<dyn AlarmSink>>,
+) {
+	info!(
+		%src, uid = %alarm.uid, counter = alarm.counter, payload_len = alarm.payload_len,
+		"camera motion alarm"
+	);
+	let now = tokio::time::Instant::now().into_std();
+	// The alarm header carries the short (sticker) UID; the registry is
+	// keyed on the long form the camera reports in `D2R_HB`, so this
+	// relies on `lookup_fresh`'s prefix fallback.
+	let Some(entry) = registry.lookup_fresh(&alarm.uid, now, stale_after) else {
+		debug!(%src, uid = %alarm.uid, "alarm for unknown or stale UID; ignoring");
+		return;
+	};
+	let suppress = Duration::from_secs(cfg.alarm_suppress_after_connect_secs);
+	let connected_for = now.saturating_duration_since(entry.first_seen);
+	let running_for = now.saturating_duration_since(started_at);
+	if connected_for < suppress || running_for < suppress {
+		debug!(
+			%src, uid = %alarm.uid,
+			connected_for_secs = connected_for.as_secs_f64(),
+			running_for_secs = running_for.as_secs_f64(),
+			suppress_secs = suppress.as_secs(),
+			"alarm suppressed inside the startup window"
+		);
+		return;
+	}
+	match alarm_sink {
+		Some(sink) => sink.on_alarm(&alarm.uid, alarm.counter),
+		None => debug!(%src, uid = %alarm.uid, "alarm accepted but no sink is configured"),
 	}
 }
 

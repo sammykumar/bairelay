@@ -48,6 +48,18 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 
+/// Receives motion alarms decoded off the register port. Implemented by
+/// the binary, which owns the camera handles and the MQTT client; this
+/// crate deliberately knows nothing about either.
+///
+/// Called once per accepted alarm packet, after the startup suppression
+/// window has passed. Cameras send a burst of three per motion edge, so
+/// implementations must tolerate repeats.
+pub trait AlarmSink: Send + Sync {
+	/// `uid` is the 16-char sticker form carried in the alarm header.
+	fn on_alarm(&self, uid: &str, counter: u32);
+}
+
 /// Build a fresh `Arc<CameraRegistry>` for the binary to share between
 /// the wake server and downstream consumers.
 /// Tests can call this too — keeps registry construction in one place.
@@ -61,11 +73,13 @@ pub fn make_registry() -> Arc<registry::CameraRegistry> {
 ///
 /// `registry` is supplied by the caller so other tasks (e.g. the
 /// push-listener that reads source IPs out of the same map) can share state.
+/// `alarm_sink` is `None` when nothing downstream wants motion edges.
 pub async fn run_with_sockets(
 	cfg: config::RuntimeConfig,
 	registry: Arc<registry::CameraRegistry>,
 	middleman_sock: UdpSocket,
 	register_sock: UdpSocket,
+	alarm_sink: Option<Arc<dyn AlarmSink>>,
 	cancel: CancellationToken,
 ) -> Result<(), WakeServerError> {
 	let middleman_sock = Arc::new(middleman_sock);
@@ -98,7 +112,9 @@ pub async fn run_with_sockets(
 		let registry = Arc::clone(&registry);
 		let anchors = Arc::clone(&anchors);
 		let cfg = cfg.clone();
-		tokio::spawn(async move { register::run(sock, registry, anchors, cfg, cancel).await })
+		tokio::spawn(async move {
+			register::run(sock, registry, anchors, cfg, alarm_sink, cancel).await
+		})
 	};
 
 	let res: Result<(), WakeServerError> = tokio::select! {
@@ -122,6 +138,7 @@ pub async fn run_with_sockets(
 pub async fn run(
 	cfg: config::RuntimeConfig,
 	registry: Arc<registry::CameraRegistry>,
+	alarm_sink: Option<Arc<dyn AlarmSink>>,
 	cancel: CancellationToken,
 ) -> Result<(), WakeServerError> {
 	let middleman_addr = std::net::SocketAddr::new(cfg.bind, cfg.middleman_port);
@@ -140,7 +157,7 @@ pub async fn run(
 				addr: register_addr,
 				source,
 			})?;
-	run_with_sockets(cfg, registry, middleman, register, cancel).await
+	run_with_sockets(cfg, registry, middleman, register, alarm_sink, cancel).await
 }
 
 #[cfg(test)]
