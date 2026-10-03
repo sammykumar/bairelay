@@ -64,6 +64,16 @@ pub(crate) fn resolve_camera<'a>(
 /// motion pipeline without the wake-server crate knowing about camera
 /// handles or MQTT. The hold window is each camera's own
 /// `motion_wake_hold_secs`.
+///
+/// Also enforces the post-disconnect deaf window
+/// (`alarm_deaf_after_disconnect_secs`). The wake server's own
+/// `alarm_suppress_after_connect_secs` is anchored to registration and
+/// process start, so it only covers the startup burst; this gate covers
+/// the burst a camera emits every time bairelay tears a session down.
+/// It lives here rather than in the wake-server crate because only the
+/// main crate holds [`CameraHandle`] session state, and it is scoped to
+/// the UDP alarm path because that burst is part of the Baichuan
+/// teardown handshake — the push listener's TCP connect is not.
 pub struct AlarmMotionSink {
 	cameras: Arc<HashMap<String, Arc<CameraHandle>>>,
 	mqtt: Option<SharedMqttClient>,
@@ -96,6 +106,17 @@ impl bairelay_wake_server::AlarmSink for AlarmMotionSink {
 			);
 			return;
 		};
+		if let Some(deaf_for) = deaf_after_disconnect(handle) {
+			tracing::debug!(
+				camera = %handle.name(),
+				uid = %uid,
+				counter,
+				since_disconnect_secs = deaf_for.since.as_secs_f64(),
+				deaf_secs = deaf_for.window.as_secs_f64(),
+				"alarm suppressed inside the post-disconnect deaf window (session teardown burst)"
+			);
+			return;
+		}
 		tracing::info!(
 			camera = %handle.name(),
 			uid = %uid,
@@ -111,6 +132,30 @@ impl bairelay_wake_server::AlarmSink for AlarmMotionSink {
 			self.cancel.clone(),
 		);
 	}
+}
+
+/// Detail of a deaf-window hit, kept so the caller can log both halves
+/// of the comparison rather than just the verdict.
+pub(crate) struct DeafWindow {
+	/// Elapsed time since the camera's last session teardown.
+	pub since: Duration,
+	/// The configured window this fell inside.
+	pub window: Duration,
+}
+
+/// `Some(..)` when an alarm arriving now is close enough behind this
+/// camera's last session teardown to be that teardown's own burst.
+///
+/// `None` — i.e. let the alarm through — when the camera has never held
+/// a session, when the window is configured to 0, or when enough time
+/// has passed that the alarm is uncorrelated with the disconnect.
+pub(crate) fn deaf_after_disconnect(handle: &CameraHandle) -> Option<DeafWindow> {
+	let window = Duration::from_secs_f64(handle.config().alarm_deaf_after_disconnect_secs);
+	if window.is_zero() {
+		return None;
+	}
+	let since = handle.since_last_disconnect()?;
+	(since < window).then_some(DeafWindow { since, window })
 }
 
 /// Fire the motion event: publish `status/motion=on`, hold a wake-lock
@@ -209,6 +254,44 @@ mod tests {
 			handle_with_uid("backyard_3", Some("9527000960WLCGYZ")),
 		);
 		assert!(resolve_camera(&cameras, "9527000960V21RLK").is_none());
+	}
+
+	/// A camera that has never held a session must not be deaf — the
+	/// very first alarm after startup is the one that wakes it.
+	#[test]
+	fn deaf_window_lets_alarms_through_before_any_disconnect() {
+		let h = handle_with_uid("backyard_2", Some("UID"));
+		assert!(deaf_after_disconnect(&h).is_none());
+	}
+
+	/// The measured failure: bairelay tears the session down and the
+	/// camera's own teardown burst lands 8-10 s later.
+	#[test]
+	fn deaf_window_swallows_the_teardown_burst() {
+		let h = handle_with_uid("backyard_2", Some("UID"));
+		h.set_last_disconnect_for_test(Duration::from_secs(9));
+		let hit = deaf_after_disconnect(&h).expect("9 s is inside the 30 s default");
+		assert_eq!(hit.window, Duration::from_secs(30));
+		assert!(hit.since >= Duration::from_secs(9));
+	}
+
+	/// Past the window an alarm is uncorrelated with the disconnect, so
+	/// it is real motion and must still wake the camera.
+	#[test]
+	fn deaf_window_expires_and_lets_real_motion_through() {
+		let h = handle_with_uid("backyard_2", Some("UID"));
+		h.set_last_disconnect_for_test(Duration::from_secs(31));
+		assert!(deaf_after_disconnect(&h).is_none());
+	}
+
+	/// 0 restores pre-0.3.5 behaviour for operators who want it.
+	#[test]
+	fn deaf_window_of_zero_is_disabled_even_right_after_teardown() {
+		let mut cfg = minimal_camera_config("backyard_2");
+		cfg.alarm_deaf_after_disconnect_secs = 0.0;
+		let h = Arc::new(CameraHandle::new(cfg, CancellationToken::new(), None));
+		h.set_last_disconnect_for_test(Duration::from_millis(1));
+		assert!(deaf_after_disconnect(&h).is_none());
 	}
 
 	#[test]

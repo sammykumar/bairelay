@@ -84,6 +84,13 @@ address = "192.168.1.187:9000"
 # idle_disconnect = false     # true for battery cams
 # idle_disconnect_timeout_secs = 45  # grace period before sleep
 # motion_wake_hold_secs = 30  # wake-lock hold after motion stops
+# alarm_deaf_after_disconnect_secs = 30  # ignore UDP motion alarms this soon
+#                             # after a session teardown; cameras emit an alarm
+#                             # burst while tearing down, and acting on it
+#                             # re-wakes the camera in a loop that never sleeps.
+#                             # 0 disables. Distinct from the wake_server's
+#                             # alarm_suppress_after_connect_secs, which only
+#                             # covers registration and process start.
 # enabled = true
 # permitted_users = ["me"]
 
