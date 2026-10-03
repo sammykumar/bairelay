@@ -219,6 +219,13 @@ pub struct CameraHandle {
 	/// the broker has lost retained messages (no-persistence config,
 	/// HA-Mosquitto-add-on restart, etc.). See `src/status_cache.rs`.
 	status_cache: Arc<StatusCache>,
+	/// Wall-clock instant of the most recent session teardown, or
+	/// `None` before the first one. Read by
+	/// [`crate::motion::AlarmMotionSink`] to drop the UDP alarm burst a
+	/// camera emits while tearing its own session down — without that
+	/// gate the burst re-arms the wake lock and the camera never sleeps.
+	/// See `alarm_deaf_after_disconnect_secs`.
+	last_disconnect: std::sync::RwLock<Option<Instant>>,
 	/// Global `Config::stream_prune_grace_secs` propagated by the
 	/// orchestrator at construction. Threaded through to
 	/// [`crate::config::resolve_idle_disconnect_timeout`] so the floor
@@ -295,6 +302,7 @@ impl CameraHandle {
 			preview_state_tx,
 			preview_state_rx,
 			status_cache: Arc::new(StatusCache::default()),
+			last_disconnect: std::sync::RwLock::new(None),
 			prune_grace: Duration::ZERO,
 		}
 	}
@@ -524,6 +532,15 @@ impl CameraHandle {
 		&self.wake_lock
 	}
 
+	/// How long ago this camera's session was last torn down, or `None`
+	/// if it has never held one. Used to gate the teardown alarm burst;
+	/// see [`crate::motion::AlarmMotionSink`].
+	pub fn since_last_disconnect(&self) -> Option<Duration> {
+		self.last_disconnect
+			.read_recover()
+			.map(|t| Instant::now().saturating_duration_since(t))
+	}
+
 	pub fn is_cancelled(&self) -> bool {
 		self.cancel.is_cancelled()
 	}
@@ -567,6 +584,18 @@ impl CameraHandle {
 	#[cfg(test)]
 	pub(crate) fn disconnect_signal_for_test(&self) -> Arc<Notify> {
 		Arc::clone(&self.disconnect_signal)
+	}
+
+	/// Test-only: stamp the last-teardown instant `ago` in the past, so
+	/// the post-disconnect deaf window can be exercised without driving
+	/// a real session through `teardown`.
+	#[cfg(test)]
+	pub(crate) fn set_last_disconnect_for_test(&self, ago: Duration) {
+		*self.last_disconnect.write_recover() = Some(
+			Instant::now()
+				.checked_sub(ago)
+				.expect("test offset predates the monotonic clock origin"),
+		);
 	}
 
 	fn set_state(&self, new: CameraState) {
@@ -1166,6 +1195,7 @@ impl CameraHandle {
 		drop(concrete);
 
 		self.set_state(CameraState::Disconnected);
+		*self.last_disconnect.write_recover() = Some(Instant::now());
 		tracing::info!(camera = %self.config.name, "Disconnected");
 
 		// Note: no MQTT availability publish on teardown. Tearing down the

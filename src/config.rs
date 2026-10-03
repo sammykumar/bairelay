@@ -334,6 +334,16 @@ pub struct CameraConfig {
 	#[serde(default = "default_motion_wake_hold_secs")]
 	pub motion_wake_hold_secs: f64,
 
+	/// Seconds after a session teardown during which UDP alarm packets
+	/// from this camera are ignored. Cameras emit an alarm burst as part
+	/// of tearing the Baichuan session down; without this window that
+	/// burst re-arms the wake lock, which reconnects, which tears down
+	/// again — a loop that never lets a battery camera sleep. Default
+	/// 30 s; measured teardown bursts land 8–10 s after the disconnect.
+	/// Set to 0 to disable (pre-0.3.5 behaviour).
+	#[serde(default = "default_alarm_deaf_after_disconnect_secs")]
+	pub alarm_deaf_after_disconnect_secs: f64,
+
 	#[serde(default = "default_true", alias = "enable")]
 	pub enabled: bool,
 
@@ -405,6 +415,7 @@ impl Default for CameraConfig {
 			idle_disconnect: false,
 			idle_disconnect_timeout_secs: None,
 			motion_wake_hold_secs: default_motion_wake_hold_secs(),
+			alarm_deaf_after_disconnect_secs: default_alarm_deaf_after_disconnect_secs(),
 			enabled: true,
 			mqtt: MqttConfig::default(),
 			pause: PauseConfig::default(),
@@ -646,6 +657,15 @@ const fn default_prune_grace_secs() -> u64 {
 }
 
 const fn default_motion_wake_hold_secs() -> f64 {
+	30.0
+}
+
+/// Deaf window applied to UDP alarm packets after a session teardown.
+/// 30 s is ~3x the 8-10 s teardown-burst latency measured on Argus
+/// units, so it swallows the self-inflicted burst with margin while
+/// leaving the camera able to report genuine motion the rest of the
+/// time it is asleep.
+const fn default_alarm_deaf_after_disconnect_secs() -> f64 {
 	30.0
 }
 
@@ -1215,6 +1235,18 @@ pub fn validate_config(config: &Config) -> Result<(), String> {
 			return Err(format!(
 				"Camera '{}': motion_wake_hold_secs must be a non-negative finite number (got {})",
 				cam.name, cam.motion_wake_hold_secs,
+			));
+		}
+
+		// alarm_deaf_after_disconnect_secs: same sanity check. 0 is
+		// allowed (disables the window), but NaN / negative / infinite
+		// would panic in `Duration::from_secs_f64`.
+		if !cam.alarm_deaf_after_disconnect_secs.is_finite()
+			|| cam.alarm_deaf_after_disconnect_secs < 0.0
+		{
+			return Err(format!(
+				"Camera '{}': alarm_deaf_after_disconnect_secs must be a non-negative finite number (got {})",
+				cam.name, cam.alarm_deaf_after_disconnect_secs,
 			));
 		}
 	}

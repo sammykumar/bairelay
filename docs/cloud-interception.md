@@ -487,3 +487,46 @@ Same shape as Part I's recipe (`docs/testing.md` § "Local wake server live-veri
 - **Other cloud endpoints we haven't characterised.** `apis.reolink.com` (device profile), Reolink's own `mqtt-cn-reolink.cn` (China-region MQTT), and any future endpoints could carry alarm-relevant traffic. None observed during motion in the captures so far, but a fuller idle-state capture would map the full set.
 - **Whether the camera ever pushes non-motion alarms via this same channel.** Reolink's alarm taxonomy includes `MD`, `PIR`, and `AI` (person/vehicle). Whether all three traverse `pushx.reolink.com` or only `MD` is untested. Today we treat any connect from a registered camera as a motion event regardless; if a non-motion alarm fires the same TCP path, we'd attribute it to motion incorrectly. No symptom observed yet.
 - **Cert pinning loosening.** If a future firmware drops to looser TLS validation, `tests/scripts/pushx-sink/` becomes the entry point for body decoding. Re-run that rig on each major firmware bump.
+
+---
+
+# Part III — the UDP alarm path and its teardown loop
+
+Part II's `pushx.reolink.com` TCP path is **inert on some Argus firmware**. Those units signal motion as a UDP `0x2a87cf31` alarm packet to the wake server's register port instead — never a TCP connect to 443. `handle_alarm` in `crates/wake-server/src/register.rs` decodes it and hands the UID up through the `AlarmSink` trait to `src/motion.rs`, which shares the publish / wake-lock / fallback tail with the push listener.
+
+## III.1 Cameras alarm while tearing a session *down*
+
+The burst is not only a motion signal. A camera emits the same packets as part of the Baichuan session teardown handshake, which puts bairelay in a loop that never lets a battery camera sleep:
+
+```
+bairelay disconnects (idle grace expires)
+  -> camera emits its teardown alarm burst ~8-10 s later
+    -> alarm handler reads it as motion, arms a motion_wake_hold_secs lock
+      -> connect loop reconnects the camera
+        -> idle grace expires again
+          -> (repeat, ~86 s per lap, forever)
+```
+
+Measured on two Argus units over 24 h: an ~86 s cycle with the camera **connected 87% of the time** (959 s of 1105 s), and a battery drain of **100% -> 42% in 7 h 25 min** — roughly a 13-hour full-charge life. The `binary_sensor` duty cycle reads only ~34% because it reflects `motion_wake_hold_secs`, not the session; **do not size the battery cost off the motion sensor, use the `Connected` / `Disconnected` log pairs.**
+
+Diagnostic that distinguishes this from real motion in frame: the alarm's phase never drifts against bairelay's own idle-grace timer. Foliage and wind do not stay phase-locked to a timer inside bairelay across consecutive cycles; a teardown burst does. Camera-side alarm counters also climb monotonically through the loop, so a rising counter is not by itself evidence of real events.
+
+## III.2 `alarm_deaf_after_disconnect_secs`
+
+Per-camera, default 30 s (~3x the observed 8-10 s teardown latency). An alarm arriving within this long after that camera's last session teardown is dropped with a `debug!` line and never reaches the motion pipeline. `0` disables it.
+
+The gate lives in `AlarmMotionSink::on_alarm` (`src/motion.rs`), not in the wake-server crate, because only the main crate holds the `CameraHandle` session state the window is measured against. It is deliberately scoped to the UDP alarm path: the push listener's signal is a TCP connect, which is not part of the teardown handshake.
+
+**This is a different knob from the wake server's `alarm_suppress_after_connect_secs`,** and neither substitutes for the other:
+
+| | anchored to | covers |
+|---|---|---|
+| `alarm_suppress_after_connect_secs` (wake server, default 60) | camera registration, wake-server start | the startup wake burst, once per restart |
+| `alarm_deaf_after_disconnect_secs` (per camera, default 30) | that camera's last session teardown | the teardown burst, every idle-disconnect cycle |
+
+The cost is a deaf window immediately after each disconnect: genuine motion landing inside it is missed. That is the intended trade — real motion at any other point in the sleep window still wakes the camera, and the alternative is a camera that never sleeps at all.
+
+## III.3 Open questions
+
+- **Whether the teardown burst is distinguishable from a real alarm by content.** Payload lengths vary (11 / 62-65 / 105-107) across both teardown and genuine events, and the body is encrypted, so today only timing separates them. Decoding the body would let the gate be exact instead of heuristic.
+- **Whether the 8-10 s latency is firmware- or model-stable.** Measured on two Argus units on one firmware. A unit that alarms later than 30 s after teardown would still loop; a unit that alarms sooner is covered with margin.

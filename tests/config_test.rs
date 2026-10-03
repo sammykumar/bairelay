@@ -1250,6 +1250,67 @@ fn validate_rejects_zero_idle_disconnect_timeout() {
 	assert!(err.contains("idle_disconnect_timeout_secs"), "error: {err}");
 }
 
+// ── alarm_deaf_after_disconnect_secs validation ──────────────────────
+
+#[test]
+fn alarm_deaf_after_disconnect_secs_defaults_to_30() {
+	let cam = test_helpers::minimal_camera_config("c");
+	assert_eq!(cam.alarm_deaf_after_disconnect_secs, 30.0);
+}
+
+#[test]
+fn alarm_deaf_after_disconnect_secs_can_be_overridden() {
+	let toml_str = r#"
+		[[cameras]]
+		name = "cam"
+		username = "admin"
+		password = "test"
+		address = "192.168.1.1:9000"
+		alarm_deaf_after_disconnect_secs = 45.0
+	"#;
+	let config = parse_config(toml_str).expect("parses");
+	assert_eq!(config.cameras[0].alarm_deaf_after_disconnect_secs, 45.0);
+}
+
+#[test]
+fn validate_rejects_negative_alarm_deaf_after_disconnect() {
+	let mut cfg = Config {
+		cameras: vec![test_helpers::minimal_camera_config("cam1")],
+		..Default::default()
+	};
+	cfg.cameras[0].alarm_deaf_after_disconnect_secs = -1.0;
+	let err = validate_config(&cfg).expect_err("must reject");
+	assert!(
+		err.contains("alarm_deaf_after_disconnect_secs"),
+		"error: {err}"
+	);
+}
+
+#[test]
+fn validate_rejects_infinite_alarm_deaf_after_disconnect() {
+	let mut cfg = Config {
+		cameras: vec![test_helpers::minimal_camera_config("cam1")],
+		..Default::default()
+	};
+	cfg.cameras[0].alarm_deaf_after_disconnect_secs = f64::INFINITY;
+	let err = validate_config(&cfg).expect_err("must reject");
+	assert!(
+		err.contains("alarm_deaf_after_disconnect_secs"),
+		"error: {err}"
+	);
+}
+
+#[test]
+fn validate_accepts_zero_alarm_deaf_after_disconnect() {
+	// 0 disables the window — legal, restores pre-0.3.5 behaviour.
+	let mut cfg = Config {
+		cameras: vec![test_helpers::minimal_camera_config("cam1")],
+		..Default::default()
+	};
+	cfg.cameras[0].alarm_deaf_after_disconnect_secs = 0.0;
+	validate_config(&cfg).expect("zero is legal");
+}
+
 // ── motion_wake_hold_secs validation ─────────────────────────────────
 
 #[test]
